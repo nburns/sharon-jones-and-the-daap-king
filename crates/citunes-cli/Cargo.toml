@@ -1,0 +1,17 @@
+[package]
+name = "citunes-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+daap-server = { path = "../daap-server" }
+media-source = { path = "../media-source" }
+media-source-fs = { path = "../media-source-fs" }
+media-source-dlna = { path = "../media-source-dlna" }
+media-source-subsonic = { path = "../media-source-subsonic" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"

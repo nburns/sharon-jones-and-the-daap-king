@@ -1,0 +1,18 @@
+[package]
+name = "media-source-fs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+media-source = { path = "../media-source" }
+async-trait.workspace = true
+bytes.workspace = true
+lofty = "0.22"
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+walkdir = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3"

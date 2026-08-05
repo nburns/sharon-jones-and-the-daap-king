@@ -1,0 +1,25 @@
+[package]
+name = "media-source-dlna"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+media-source = { path = "../media-source" }
+async-trait.workspace = true
+bytes.workspace = true
+futures = "0.3"
+http = "1"
+quick-xml = { version = "0.38", features = ["serialize"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+rupnp = "3"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing.workspace = true
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

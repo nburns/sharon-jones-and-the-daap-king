@@ -1,0 +1,26 @@
+[package]
+name = "daap-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+media-source = { path = "../media-source" }
+pict = { path = "../pict" }
+axum.workspace = true
+bytes.workspace = true
+fast_image_resize = "5"
+hyper.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+lru = "0.16"
+mdns-sd.workspace = true
+serde = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tower = { version = "0.5", features = ["util"] }
