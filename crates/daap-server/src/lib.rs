@@ -2,6 +2,7 @@ pub mod artwork;
 pub mod charset;
 pub mod content_codes;
 pub mod dmap;
+pub mod exact_length_reader;
 pub mod http;
 pub mod mdns;
 pub mod prefix_reader;

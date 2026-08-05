@@ -16,6 +16,7 @@ use tokio_util::io::ReaderStream;
 use crate::artwork::{self, Artworker, OutputVariant, Prepared};
 use crate::charset::{charset_from_accept, Charset};
 use crate::content_codes;
+use crate::exact_length_reader::ExactLengthReader;
 use crate::prefix_reader::PrefixReader;
 use crate::responses;
 use crate::server_info::{self, ClientDialect, ServerInfo};
@@ -614,14 +615,30 @@ async fn serve_transcoded<S: MediaSource + 'static>(
     // (no seekable output means it can't back-patch chunk sizes itself).
     // Header goes only on the first response fragment; range-partial
     // responses skip it since we're already in the data region.
-    let mut resp = if matches!(served, ServedFormat::ClassicAiff) && !seek_time_ms.is_some() {
+    //
+    // Both paths also wrap ffmpeg's output in an ExactLengthReader so the
+    // body matches the Content-Length exactly. `duration_ms` metadata
+    // isn't sample-accurate, so a raw ffmpeg PCM stream can end up ~10s
+    // to ~1000s of bytes short or long. A fixed Content-Length with a
+    // shorter body causes hyper to close the connection early, which
+    // classic Mac clients see as `MacTCP recv -23005`.
+    let mut resp = if matches!(served, ServedFormat::ClassicAiff) && seek_time_ms.is_none() {
         let sample_count = track
             .duration_ms
             .map(|d| (d as u64 * transcode::CLASSIC_AIFF_SAMPLE_RATE as u64 / 1000) as u32)
             .unwrap_or(0);
         let header = transcode::classic_aiff_header(sample_count).to_vec();
-        let prefixed = PrefixReader::new(header, transcode_handle);
+        let exact = ExactLengthReader::new(transcode_handle, sample_count as u64, 0);
+        let prefixed = PrefixReader::new(header, exact);
         Response::new(Body::from_stream(ReaderStream::new(prefixed)))
+    } else if matches!(served, ServedFormat::ClassicAiff) {
+        // Range case: no header prefix, expected length is end - start + 1.
+        let expected = match (end_incl, est_total) {
+            (Some(end), Some(_)) => end - start + 1,
+            _ => 0,
+        };
+        let exact = ExactLengthReader::new(transcode_handle, expected, 0);
+        Response::new(Body::from_stream(ReaderStream::new(exact)))
     } else {
         Response::new(Body::from_stream(ReaderStream::new(transcode_handle)))
     };
