@@ -78,6 +78,11 @@ pub fn encode(info: &ServerInfo<'_>) -> BytesMut {
         u8_field(b, tags::supports_index(), 1);
 
         u32_field(b, tags::databases_count(), info.database_count);
+
+        // Sharon-jones custom capabilities. Absent from stock DAAP; iRunes
+        // and other cooperating clients look for `shrf` to gate features
+        // before sending non-standard params like `query=` on items.
+        u32_field(b, tags::sharon_features(), tags::SHRF_QUERY);
     });
     out
 }
@@ -209,6 +214,19 @@ mod tests {
         let body = encode(&info);
         let declared = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
         assert_eq!(declared, body.len() - 8, "container length should equal body size");
+    }
+
+    #[test]
+    fn advertises_sharon_query_capability() {
+        let info = ServerInfo {
+            name: "x",
+            database_count: 1,
+            requires_password: false,
+            dialect: ClientDialect::V3,
+        };
+        let body = encode(&info);
+        let bits = read_u32(&body, b"shrf");
+        assert_eq!(bits & tags::SHRF_QUERY, tags::SHRF_QUERY);
     }
 
     #[test]

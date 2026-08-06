@@ -320,7 +320,14 @@ fn parse_didl_lite(
     base_url: &Url,
 ) -> Result<(Vec<(String, String)>, Vec<AudioItem>), BrowseError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // trim_text is intentionally OFF: quick-xml 0.38 splits text runs
+    // around entity references (`&amp;` etc. are emitted as separate
+    // Event::GeneralRef events), and trimming each fragment would drop
+    // the whitespace around them - e.g. "Toots & The Maytals" would
+    // arrive as ["Toots", "&", "The Maytals"] and concatenate into
+    // "Toots&The Maytals". With trim off, we get the whitespace back;
+    // final trim happens in finalize_item / container-close below.
+    reader.config_mut().trim_text(false);
 
     let mut containers = Vec::new();
     let mut items = Vec::new();
@@ -331,15 +338,29 @@ fn parse_didl_lite(
         match reader.read_event() {
             Ok(Event::Start(e)) => handle_start(&e, &mut node, &mut text_target),
             Ok(Event::Text(t)) => {
-                let text = String::from_utf8_lossy(&t).into_owned();
+                let text = t
+                    .decode()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&t).into_owned());
                 if let Some(target) = text_target {
                     apply_text(&mut node, target, text);
                 }
             }
+            Ok(Event::GeneralRef(r)) => {
+                // Entity reference (`&amp;`, `&lt;`, `&#65;`, ...) inside a
+                // text run. Resolve to its literal string and append to the
+                // active target so it slots in between the Text fragments
+                // on either side.
+                if let Some(target) = text_target {
+                    let name = String::from_utf8_lossy(&r);
+                    if let Some(resolved) = resolve_entity(&name) {
+                        apply_text(&mut node, target, resolved);
+                    }
+                }
+            }
             Ok(Event::CData(t)) => {
-                // Same treatment as Text — some servers wrap arbitrary field
-                // values in CDATA sections. We treat them as literal string
-                // content (no further entity decoding needed).
+                // CDATA is literal - no entity decoding. Some servers wrap
+                // arbitrary field values in CDATA to sidestep entity handling.
                 let text = String::from_utf8_lossy(&t).into_owned();
                 if let Some(target) = text_target {
                     apply_text(&mut node, target, text);
@@ -350,9 +371,16 @@ fn parse_didl_lite(
                 let local = local_name(name.as_ref());
                 match local {
                     "container" => {
-                        if let Node::Container { id, title } =
+                        if let Node::Container { id, mut title } =
                             std::mem::replace(&mut node, Node::None)
                         {
+                            // Trim edges of the assembled text run; interior
+                            // whitespace (which now correctly surrounds any
+                            // entity references) is preserved.
+                            let trimmed = title.trim();
+                            if trimmed.len() != title.len() {
+                                title = trimmed.to_string();
+                            }
                             containers.push((id, title));
                         }
                     }
@@ -494,11 +522,14 @@ fn finalize_item(b: ItemBuilder, base_url: &Url) -> Option<AudioItem> {
     Some(AudioItem {
         id: 0,
         dlna_id: b.dlna_id,
-        title: b.title,
-        artist: b.artist,
-        album: b.album,
-        album_artist: b.album_artist,
-        genre: b.genre,
+        // Trim edges of assembled text runs. Interior whitespace (which
+        // now correctly surrounds any entity references we handled) is
+        // preserved.
+        title: b.title.trim().to_string(),
+        artist: b.artist.map(|s| s.trim().to_string()),
+        album: b.album.map(|s| s.trim().to_string()),
+        album_artist: b.album_artist.map(|s| s.trim().to_string()),
+        genre: b.genre.map(|s| s.trim().to_string()),
         track_number: b.track_number,
         year: b.year,
         duration_ms: res.duration_ms,
@@ -510,6 +541,30 @@ fn finalize_item(b: ItemBuilder, base_url: &Url) -> Option<AudioItem> {
         stream_url,
         album_art_uri,
     })
+}
+
+/// Resolve a DIDL entity reference (the name between `&` and `;`) to its
+/// literal string form. Supports the five XML built-ins and numeric char
+/// refs (`#65`, `#x41`). Unknown names return `None`, matching how a
+/// lenient consumer would treat a stray entity - drop rather than error.
+fn resolve_entity(name: &str) -> Option<String> {
+    match name {
+        "amp" => Some("&".to_string()),
+        "lt" => Some("<".to_string()),
+        "gt" => Some(">".to_string()),
+        "quot" => Some("\"".to_string()),
+        "apos" => Some("'".to_string()),
+        n if n.starts_with('#') => {
+            let rest = &n[1..];
+            let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                rest.parse::<u32>().ok()?
+            };
+            char::from_u32(code).map(|c| c.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn local_name(name: &[u8]) -> &str {
@@ -691,6 +746,40 @@ mod tests {
         assert_eq!(items.len(), 1, "item should parse");
         assert_eq!(items[0].title, "It's Over");
         assert_eq!(items[0].artist.as_deref(), Some("I've Waited"));
+    }
+
+    #[test]
+    fn parses_title_with_ampersand_entity() {
+        // Regression: real DIDL escapes literal `&` as `&amp;`. Text events
+        // must be `.unescape()`d during parsing or the ampersand (plus
+        // whatever whitespace surrounds it after fragment stitching) gets
+        // dropped, turning "Toots & The Maytals" into "TootsThe Maytals".
+        let xml = r#"
+<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
+           xmlns:dc="http://purl.org/dc/elements/1.1/"
+           xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
+  <container id="c1" parentID="0">
+    <dc:title>Toots &amp; The Maytals - Reggae Got Soul (1976)</dc:title>
+    <upnp:class>object.container</upnp:class>
+  </container>
+  <item id="i1" parentID="c1">
+    <dc:title>Rock &amp; Roll &lt;live&gt;</dc:title>
+    <upnp:artist>G. Love &amp; Special Sauce</upnp:artist>
+    <upnp:album>Yeah, It&apos;s That Easy</upnp:album>
+    <upnp:class>object.item.audioItem.musicTrack</upnp:class>
+    <res protocolInfo="http-get:*:audio/mpeg:*">http://x/s.mp3</res>
+  </item>
+</DIDL-Lite>"#;
+        let base = Url::parse("http://x/").unwrap();
+        let (containers, items) = parse_didl_lite(xml, &base).unwrap();
+        assert_eq!(
+            containers,
+            vec![("c1".into(), "Toots & The Maytals - Reggae Got Soul (1976)".into())]
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Rock & Roll <live>");
+        assert_eq!(items[0].artist.as_deref(), Some("G. Love & Special Sauce"));
+        assert_eq!(items[0].album.as_deref(), Some("Yeah, It's That Easy"));
     }
 
     #[test]

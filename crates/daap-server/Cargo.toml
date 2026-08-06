@@ -9,7 +9,9 @@ media-source = { path = "../media-source" }
 pict = { path = "../pict" }
 axum.workspace = true
 bytes.workspace = true
+deunicode = "1"
 fast_image_resize = "5"
+ib-romaji = "0.2"
 hyper.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 lru = "0.16"
@@ -19,6 +21,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }
 tracing.workspace = true
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 async-trait.workspace = true

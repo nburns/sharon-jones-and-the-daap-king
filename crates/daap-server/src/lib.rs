@@ -7,6 +7,7 @@ pub mod http;
 pub mod mdns;
 pub mod prefix_reader;
 pub mod responses;
+pub mod search;
 pub mod server_info;
 pub mod session;
 pub mod tags;

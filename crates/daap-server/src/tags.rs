@@ -68,6 +68,14 @@ pub fn song_size() -> Tag { tag("assz") }                // int32,  daap.songsiz
 pub fn playlist_smart() -> Tag { tag("apsm") }           // uint8,  daap.baseplaylist? / smart flag
 pub fn base_playlist() -> Tag { tag("abpl") }            // uint8,  daap.baseplaylist (1=main library)
 
+// ---- sharon-jones custom extensions ----
+/// `shrf` — Sharon features bitfield. Advertised inside `msrv` so clients
+/// can gate on it before sending server-side search queries.
+///   Bit 0 (0x01) = QUERY: server accepts `query=` on /databases/N/items.
+pub fn sharon_features() -> Tag { tag("shrf") }          // uint32, sharon-jones extension
+
+pub const SHRF_QUERY: u32 = 0x0000_0001;
+
 /// Encode a DMAP `version` int: major.minor packed as (major<<16) | minor.
 pub const fn version(major: u16, minor: u16) -> u32 {
     ((major as u32) << 16) | (minor as u32)

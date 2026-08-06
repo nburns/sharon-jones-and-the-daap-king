@@ -19,6 +19,7 @@ use crate::content_codes;
 use crate::exact_length_reader::ExactLengthReader;
 use crate::prefix_reader::PrefixReader;
 use crate::responses;
+use crate::search;
 use crate::server_info::{self, ClientDialect, ServerInfo};
 use crate::session::SessionStore;
 use crate::transcode::{self, choose_format, client_supports_modern_codecs, ServedFormat, Transcoder};
@@ -204,6 +205,29 @@ async fn handle_items<S: MediaSource + 'static>(
             }
         }
     }
+
+    // Sharon-jones extension: server-side search. Filter the track list
+    // when `query=` is present. `mtco` reflects the post-filter total so
+    // paginated fetches (index=A-B) with the same query return a stable
+    // slice of the filtered set. Malformed query → 400 (client stops
+    // retrying that keystroke instead of hammering the endpoint).
+    if let Some(raw) = idx.query.as_deref() {
+        let q = match search::parse(raw) {
+            Ok(q) => q,
+            Err(err) => {
+                return (StatusCode::BAD_REQUEST, format!("bad query: {err:?}"))
+                    .into_response_stub();
+            }
+        };
+        tracks.retain(|t| search::matches(&q, t));
+    }
+
+    // Stable ordering across paged fetches of the same query. Source
+    // order is stable per call but not necessarily identical between
+    // calls; pin it by track id so `index=0-199` + `index=200-399`
+    // concatenate without drift.
+    tracks.sort_by_key(|t| t.id);
+
     let total = tracks.len();
     let range = parse_index_range(idx.index.as_deref());
     let sliced = apply_index_range(&tracks, range);
@@ -219,16 +243,17 @@ async fn handle_containers<S: MediaSource + 'static>(
     let cs = charset_from_accept(headers.get(header::ACCEPT_CHARSET).and_then(|v| v.to_str().ok()));
     let tracks = state.source.tracks(db).await.unwrap_or_default();
     let mut extras = state.source.playlists(db).await.unwrap_or_default();
-    // Stable case-insensitive alpha order. The paginated 68k source pane
-    // fetches pages independently, so joining page N with page N+1 must
-    // yield the same order as fetching the full range. Source-defined
-    // order (e.g. Subsonic catalogue order) is stable across calls but
-    // isn't alphabetical, and isn't a documented contract - pin it here.
-    extras.sort_by(|a, b| {
-        a.name
-            .to_ascii_lowercase()
-            .cmp(&b.name.to_ascii_lowercase())
-    });
+    // Stable case-insensitive order. The paginated 68k source pane fetches
+    // pages independently, so joining page N with page N+1 must yield the
+    // same order as fetching the full range. Source-defined order (e.g.
+    // Subsonic catalogue order) is stable across calls but isn't a
+    // documented contract - pin it here.
+    //
+    // Sort key is (artist, year, album) when a DLNA-style
+    // "Artist - Album (YYYY)" name parses; otherwise (full_name, MAX,
+    // full_name) so non-parseable names still cluster naturally against
+    // parsed ones. Unknown year sorts last within an artist cluster.
+    extras.sort_by(|a, b| playlist_sort_key(&a.name).cmp(&playlist_sort_key(&b.name)));
 
     let total = 1 + extras.len();
     let range = parse_index_range(idx.index.as_deref());
@@ -244,6 +269,44 @@ async fn handle_containers<S: MediaSource + 'static>(
         ),
         cs,
     )
+}
+
+/// Build the sort key for a playlist name. Recognises the DLNA-style
+/// `Artist - Album (YYYY)` convention and returns `(artist, year, album)`
+/// so albums within an artist cluster chronologically. Names that don't
+/// match fall through to `(full_name, u16::MAX, full_name)` so they still
+/// interleave sensibly with parsed ones.
+fn playlist_sort_key(name: &str) -> (String, u16, String) {
+    if let Some((artist, album, year)) = parse_artist_album_year(name) {
+        return (artist.to_lowercase(), year, album.to_lowercase());
+    }
+    let lower = name.to_lowercase();
+    (lower.clone(), u16::MAX, lower)
+}
+
+/// Try to parse `Artist - Album (YYYY)` at the end of `name`. Year must
+/// be exactly 4 ASCII digits wrapped in parens as the final token; the
+/// remainder is split on the first ` - ` into artist and album. Returns
+/// None if any part is missing.
+fn parse_artist_album_year(name: &str) -> Option<(&str, &str, u16)> {
+    let trimmed = name.trim_end();
+    let inner = trimmed.strip_suffix(')')?;
+    let open = inner.rfind('(')?;
+    let year_str = &inner[open + 1..];
+    if year_str.len() != 4 || !year_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: u16 = year_str.parse().ok()?;
+    // The ` (YYYY)` chunk must be preceded by at least one space to avoid
+    // eating a trailing "(1971)" that's part of an album title itself.
+    let before_year = inner[..open].strip_suffix(' ')?;
+    let (artist, album) = before_year.split_once(" - ")?;
+    let artist = artist.trim();
+    let album = album.trim();
+    if artist.is_empty() || album.is_empty() {
+        return None;
+    }
+    Some((artist, album, year))
 }
 
 /// Map an absolute-index `?index=` range onto the (Library at abs 0,
@@ -347,6 +410,9 @@ struct IndexQuery {
     /// (`dmap.itemid,dmap.containeritemid`); resource-constrained clients
     /// opt into full per-track metadata by sending `meta=all`.
     meta: Option<String>,
+    /// Server-side search filter (sharon-jones extension, gated by the
+    /// `shrf` capability bit in /server-info). See `search::parse`.
+    query: Option<String>,
 }
 
 /// True when the client's `meta=` value contains `all` (case-insensitive,
@@ -1395,6 +1461,122 @@ mod tests {
         out
     }
 
+    #[test]
+    fn parse_artist_album_year_shapes() {
+        assert_eq!(
+            parse_artist_album_year("Beatles - Rubber Soul (1965)"),
+            Some(("Beatles", "Rubber Soul", 1965))
+        );
+        // Trailing whitespace tolerated.
+        assert_eq!(
+            parse_artist_album_year("Beatles - Abbey Road (1969)   "),
+            Some(("Beatles", "Abbey Road", 1969))
+        );
+        // Album title contains a paren-year of its own; only the trailing
+        // one counts.
+        assert_eq!(
+            parse_artist_album_year("Zeppelin - IV (Remaster 2014) (1971)"),
+            Some(("Zeppelin", "IV (Remaster 2014)", 1971))
+        );
+        // Album title with " - " in it - split at first occurrence.
+        assert_eq!(
+            parse_artist_album_year("Wilco - A Ghost Is Born - Deluxe (2004)"),
+            Some(("Wilco", "A Ghost Is Born - Deluxe", 2004))
+        );
+        // Not matching - no separator.
+        assert_eq!(parse_artist_album_year("60's Music"), None);
+        // Not matching - year is not 4 digits.
+        assert_eq!(parse_artist_album_year("Artist - Album (12)"), None);
+        // Not matching - no space before the year paren.
+        assert_eq!(parse_artist_album_year("Artist - Album(1971)"), None);
+    }
+
+    #[tokio::test]
+    async fn containers_within_artist_sort_chronologically() {
+        // Three Beatles albums, shuffled input order. Expected sidebar
+        // order: 1963, 1965, 1969 (chronological within the cluster).
+        let names = vec![
+            "Beatles - Abbey Road (1969)".into(),
+            "Beatles - Please Please Me (1963)".into(),
+            "Beatles - Rubber Soul (1965)".into(),
+        ];
+        let r = app_with_playlist_names(names)
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        let out = collect_minm_values(&body);
+        assert_eq!(
+            out,
+            vec![
+                "Library",
+                "Beatles - Please Please Me (1963)",
+                "Beatles - Rubber Soul (1965)",
+                "Beatles - Abbey Road (1969)",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn containers_across_artists_cluster_by_artist() {
+        // Two artists, each with two albums. Artists sorted alpha;
+        // albums within each cluster sorted chronologically.
+        let names = vec![
+            "Wilco - A Ghost Is Born (2004)".into(),
+            "Beatles - Abbey Road (1969)".into(),
+            "Wilco - Yankee Hotel Foxtrot (2002)".into(),
+            "Beatles - Please Please Me (1963)".into(),
+        ];
+        let r = app_with_playlist_names(names)
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        let out = collect_minm_values(&body);
+        assert_eq!(
+            out,
+            vec![
+                "Library",
+                "Beatles - Please Please Me (1963)",
+                "Beatles - Abbey Road (1969)",
+                "Wilco - Yankee Hotel Foxtrot (2002)",
+                "Wilco - A Ghost Is Born (2004)",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn containers_names_without_year_interleave_alpha() {
+        // Non-parseable names sort by their full name against the artist
+        // key of parseable ones. "60's Music" < "Beatles" < "Miscellany".
+        let names = vec![
+            "Beatles - Abbey Road (1969)".into(),
+            "Miscellany".into(),
+            "60's Music".into(),
+        ];
+        let r = app_with_playlist_names(names)
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        let out = collect_minm_values(&body);
+        assert_eq!(
+            out,
+            vec![
+                "Library",
+                "60's Music",
+                "Beatles - Abbey Road (1969)",
+                "Miscellany",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn containers_extras_returned_alphabetical() {
         let r = app_with_playlist_names(vec!["Zebra".into(), "apple".into(), "Middle".into()])
@@ -1637,5 +1819,195 @@ mod tests {
         assert_eq!(r.headers().get(header::CONTENT_RANGE).unwrap(), "bytes 90-99/100");
         let body = body_of(r).await;
         assert_eq!(body.len(), 10);
+    }
+
+    // ---- server-side search (sharon-jones extension) ----
+
+    struct SearchSource {
+        tracks: Vec<Track>,
+    }
+
+    #[async_trait]
+    impl MediaSource for SearchSource {
+        async fn databases(&self) -> MSResult<Vec<Database>> {
+            Ok(vec![Database { id: 1, name: "S".into() }])
+        }
+        async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
+            Ok(self.tracks.clone())
+        }
+        async fn playlists(&self, _db: DatabaseId) -> MSResult<Vec<Playlist>> {
+            Ok(vec![])
+        }
+        async fn open_stream(&self, _: DatabaseId, _: TrackId) -> MSResult<StreamHandle> {
+            unimplemented!()
+        }
+        async fn artwork(&self, _: DatabaseId, _: TrackId) -> MSResult<Option<Bytes>> {
+            Ok(None)
+        }
+    }
+
+    fn mk_track(id: u32, title: &str, artist: &str, album: &str) -> Track {
+        Track {
+            id,
+            title: title.into(),
+            artist: Some(artist.into()),
+            album: Some(album.into()),
+            album_artist: None,
+            genre: None,
+            track_number: None,
+            disc_number: None,
+            year: None,
+            duration_ms: Some(1000),
+            bitrate_kbps: Some(128),
+            sample_rate: Some(44100),
+            size_bytes: Some(1234),
+            format: AudioFormat::Mp3,
+        }
+    }
+
+    fn search_app(tracks: Vec<Track>) -> Router {
+        let mut cfg = crate::transcode::Config::default();
+        cfg.enabled = false;
+        router(Arc::new(HandlerState::new_with_transcode(
+            "S".into(),
+            Arc::new(SearchSource { tracks }),
+            cfg,
+        )))
+    }
+
+    /// Collect every top-level `miid` (item id) value from an adbs body.
+    fn collect_miids(body: &[u8]) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 12 <= body.len() {
+            if &body[i..i + 4] == b"miid" {
+                let len = u32::from_be_bytes(body[i + 4..i + 8].try_into().unwrap());
+                if len == 4 {
+                    out.push(u32::from_be_bytes(body[i + 8..i + 12].try_into().unwrap()));
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn items_query_filters_across_all_three_fields() {
+        // Track 1: "love" in title. Track 2: "love" in artist. Track 3:
+        // "love" in album. Track 4: no "love" anywhere. All four match
+        // the OR'd query except track 4.
+        let tracks = vec![
+            mk_track(1, "Love Song", "Nobody", "Album A"),
+            mk_track(2, "Song", "Love Battery", "Album B"),
+            mk_track(3, "Song", "Nobody", "A Love Supreme"),
+            mk_track(4, "Song", "Nobody", "Album D"),
+        ];
+        let q = "('dmap.itemname:*love*','daap.songartist:*love*','daap.songalbum:*love*')";
+        // axum's Query extractor URL-decodes automatically; encode the
+        // whole value for realism.
+        let encoded: String = url_encode(q);
+        let uri = format!("/databases/1/items?session-id=1&type=music&meta=all&index=0-199&query={}", encoded);
+        let r = search_app(tracks).oneshot(
+            Request::builder().uri(&uri).body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_of(r).await;
+        assert_eq!(find_field_u32(&body, b"mtco"), 3);
+        assert_eq!(find_field_u32(&body, b"mrco"), 3);
+        assert_eq!(collect_miids(&body), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn items_query_case_insensitive() {
+        let tracks = vec![
+            mk_track(1, "T", "The Beatles", "A"),
+            mk_track(2, "T", "THE BEATLES", "B"),
+            mk_track(3, "T", "the beatles", "C"),
+        ];
+        // Lowercase vs. mixed-case queries hit the same set.
+        for pat in ["*beatles*", "*Beatles*", "*BEATLES*"] {
+            let q = format!("('daap.songartist:{}')", pat);
+            let uri = format!("/databases/1/items?query={}", url_encode(&q));
+            let r = search_app(tracks.clone()).oneshot(
+                Request::builder().uri(&uri).body(Body::empty()).unwrap()
+            ).await.unwrap();
+            let body = body_of(r).await;
+            assert_eq!(find_field_u32(&body, b"mtco"), 3, "pattern {pat}");
+        }
+    }
+
+    #[tokio::test]
+    async fn items_query_zero_hits_returns_200_empty() {
+        // No track matches — must be a normal empty listing, not 404.
+        let tracks = vec![mk_track(1, "T", "A", "B")];
+        let q = "('dmap.itemname:*nothingmatches*')";
+        let uri = format!("/databases/1/items?query={}", url_encode(q));
+        let r = search_app(tracks).oneshot(
+            Request::builder().uri(&uri).body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_of(r).await;
+        assert_eq!(&body[0..4], b"adbs");
+        assert_eq!(find_field_u32(&body, b"mtco"), 0);
+        assert_eq!(find_field_u32(&body, b"mrco"), 0);
+        assert_eq!(count_mlit(&body), 0);
+    }
+
+    #[tokio::test]
+    async fn items_query_malformed_returns_400() {
+        let tracks = vec![mk_track(1, "T", "A", "B")];
+        // Missing outer parens.
+        let uri = "/databases/1/items?query=daap.songartist:*x*";
+        let r = search_app(tracks).oneshot(
+            Request::builder().uri(uri).body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn items_query_paginates_stably() {
+        // 30 tracks all matching "song"; two pages of 15 each must join
+        // into the full range in the same order.
+        let tracks: Vec<Track> = (1..=30u32)
+            .map(|i| mk_track(i, &format!("song {i}"), "Any", "Any"))
+            .collect();
+        let q = "('dmap.itemname:*song*')";
+        let base = format!("/databases/1/items?query={}", url_encode(q));
+
+        let full = collect_miids(&body_of(
+            search_app(tracks.clone()).oneshot(
+                Request::builder().uri(format!("{base}&index=0-29")).body(Body::empty()).unwrap()
+            ).await.unwrap()
+        ).await);
+        let page_a = collect_miids(&body_of(
+            search_app(tracks.clone()).oneshot(
+                Request::builder().uri(format!("{base}&index=0-14")).body(Body::empty()).unwrap()
+            ).await.unwrap()
+        ).await);
+        let page_b = collect_miids(&body_of(
+            search_app(tracks).oneshot(
+                Request::builder().uri(format!("{base}&index=15-29")).body(Body::empty()).unwrap()
+            ).await.unwrap()
+        ).await);
+        let joined: Vec<u32> = page_a.into_iter().chain(page_b).collect();
+        assert_eq!(joined, full);
+        assert_eq!(joined.len(), 30);
+    }
+
+    /// Minimal percent-encoder for the search-tests. Only encodes the
+    /// characters that would confuse a URL parser here: `(`, `)`, `'`,
+    /// `,`, `:`, `*`, space. Everything else passes through unchanged.
+    fn url_encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() * 3);
+        for b in s.bytes() {
+            match b {
+                b'(' | b')' | b'\'' | b',' | b':' | b'*' | b' ' => {
+                    out.push('%');
+                    out.push_str(&format!("{:02X}", b));
+                }
+                _ => out.push(b as char),
+            }
+        }
+        out
     }
 }

@@ -5,15 +5,109 @@
 //! sends `Accept-Charset: x-mac-roman`, we run string fields through
 //! [`Charset::MacRoman`] before writing them into the DMAP payload.
 //!
-//! Encoding notes:
-//!   * ASCII 0x20..0x7E passes through unchanged (MacRoman is ASCII-superset).
-//!   * Common Latin-supplement code points map to MacRoman positions per
-//!     Apple's canonical table (Inside Macintosh: Text, Appendix E).
-//!   * Anything unmappable → `?` (ASCII 0x3F).
+//! Encoding pipeline for [`to_macroman`]:
+//!   1. If the string contains any Japanese / CJK script (hiragana,
+//!      katakana, or Han ideographs), pre-pass through `ib-romaji` to
+//!      turn readings into Hepburn romaji. Unmatched runs fall through
+//!      unchanged. This is the aesthetics-over-correctness call — CJK
+//!      Han without kana context might be Chinese, but the JP pinyin
+//!      dictionary still gives a Latin surface form worth reading.
+//!   2. NFC-normalize so decomposed forms (e.g. `e` + combining acute
+//!      from macOS filesystem tags) compose back into their pre-composed
+//!      code points before the table lookup.
+//!   3. ASCII 0x20..0x7E passes through unchanged (MacRoman is ASCII-super).
+//!   4. Common Latin-supplement code points map to MacRoman positions per
+//!      Apple's canonical table (Inside Macintosh: Text, Appendix E).
+//!   5. Combining marks that survived NFC (couldn't compose with a base) are
+//!      dropped — the base char is already out.
+//!   6. Otherwise, transliterate via `deunicode` into a Latin approximation
+//!      and re-lookup each byte through the table. This is the fallback
+//!      that catches Chinese-only text, non-JP CJK, and Unicode that
+//!      slipped through the other stages.
+//!   7. Anything still unmappable → `?` (ASCII 0x3F).
 //!
 //! We don't ship the full 256-entry Unicode↔MacRoman table — just the ~90
 //! code points that show up in real-world artist/track/album names. Extend
 //! as gaps show up.
+
+use std::sync::OnceLock;
+
+use ib_romaji::HepburnRomanizer;
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
+
+/// Global romanizer — 4.8 MiB Aho-Corasick / dict tables. Built once on
+/// first use, then shared across all requests.
+fn romanizer() -> &'static HepburnRomanizer {
+    static R: OnceLock<HepburnRomanizer> = OnceLock::new();
+    R.get_or_init(HepburnRomanizer::default)
+}
+
+/// True when `c` is in a Japanese script range that ib-romaji can handle:
+/// hiragana, katakana (full + phonetic-ext + half-width), or CJK Unified
+/// Ideographs (Han). Han is ambiguous JP/CN, but we prefer trying romaji.
+fn is_japanese_script(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x309F      // Hiragana
+        | 0x30A0..=0x30FF    // Katakana
+        | 0x31F0..=0x31FF    // Katakana Phonetic Extensions
+        | 0xFF66..=0xFF9F    // Halfwidth Katakana
+        | 0x3400..=0x4DBF    // CJK Ext A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+    )
+}
+
+/// Greedy longest-match walk with ib-romaji. Matched runs are concatenated
+/// directly (kana strings like `ありがとう` become `arigatou`, not
+/// `a ri ga to u`). Unmatched chars pass through so the next stage in the
+/// pipeline can handle them. A single space is inserted at kana↔non-kana
+/// boundaries so words don't smash into surrounding Latin text.
+fn romanize_japanese(s: &str) -> String {
+    let r = romanizer();
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_romaji = false;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        let mut best: Option<(usize, &'static str)> = None;
+        r.romanize_and_try_for_each(&s[i..], |len, romaji| {
+            match best {
+                Some((n, _)) if n >= len => {}
+                _ => best = Some((len, romaji)),
+            }
+            None::<()>
+        });
+        if let Some((len, romaji)) = best {
+            if !last_was_romaji {
+                // Entering a JP run from Latin/space - no leading separator
+                // needed because the source already had its own boundary.
+            }
+            out.push_str(romaji);
+            last_was_romaji = true;
+            i += len;
+        } else {
+            let c_len = std::str::from_utf8(&bytes[i..])
+                .ok()
+                .and_then(|s| s.chars().next())
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
+            let ch = &s[i..i + c_len];
+            // If we're leaving a romaji run and the next char is a letter
+            // (i.e. an untranslated kanji that will become pinyin, or a
+            // Latin letter), insert a space to avoid word-smash.
+            if last_was_romaji {
+                let starts_letter = ch.chars().next().is_some_and(|c| c.is_alphabetic());
+                if starts_letter {
+                    out.push(' ');
+                }
+            }
+            out.push_str(ch);
+            last_was_romaji = false;
+            i += c_len;
+        }
+    }
+    out
+}
 
 /// Which byte encoding to use for DMAP string field values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,22 +153,42 @@ pub fn charset_from_accept(header: Option<&str>) -> Charset {
     Charset::Utf8
 }
 
-/// Lossy UTF-8 → MacRoman transliteration. Unmappable chars become '?'.
+/// Lossy UTF-8 → MacRoman transliteration. See module docs for pipeline.
 pub fn to_macroman(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    for c in s.chars() {
-        let byte = if (c as u32) < 0x80 {
-            c as u8
-        } else {
-            LATIN_EXT
-                .iter()
-                .find(|(u, _)| *u == c)
-                .map(|(_, b)| *b)
-                .unwrap_or(b'?')
-        };
-        out.push(byte);
+    let owned;
+    let input: &str = if s.chars().any(is_japanese_script) {
+        owned = romanize_japanese(s);
+        &owned
+    } else {
+        s
+    };
+    let mut out = Vec::with_capacity(input.len());
+    for c in input.nfc() {
+        encode_char(c, &mut out);
     }
     out
+}
+
+fn encode_char(c: char, out: &mut Vec<u8>) {
+    if (c as u32) < 0x80 {
+        out.push(c as u8);
+        return;
+    }
+    if let Some(b) = LATIN_EXT.iter().find(|(u, _)| *u == c).map(|(_, b)| *b) {
+        out.push(b);
+        return;
+    }
+    if is_combining_mark(c) {
+        return;
+    }
+    // deunicode always returns ASCII, so we push its bytes directly rather
+    // than re-recursing through encode_char (avoids infinite loops if it
+    // ever returned a non-ASCII fallback for a specific char).
+    match deunicode::deunicode_char(c) {
+        Some("") => {}
+        Some(s) => out.extend_from_slice(s.as_bytes()),
+        None => out.push(b'?'),
+    }
 }
 
 /// Common non-ASCII Unicode → MacRoman code points. Sourced from Apple's
@@ -143,9 +257,73 @@ mod tests {
     }
 
     #[test]
-    fn unmappable_becomes_question_mark() {
-        assert_eq!(to_macroman("💯"), b"?");
-        assert_eq!(to_macroman("日本語"), b"???");
+    fn emoji_gets_descriptive_transliteration() {
+        // deunicode surprisingly has descriptive fallbacks for many
+        // emoji — 💯 → "100 ". Nicer than `?`. Assert it stayed ASCII.
+        let out = to_macroman("💯");
+        assert!(std::str::from_utf8(&out).unwrap().is_ascii());
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn truly_unmappable_becomes_question_mark() {
+        // Private-use area code points have no transliteration.
+        assert_eq!(to_macroman("\u{E000}"), b"?");
+    }
+
+    #[test]
+    fn cjk_han_routes_through_romaji_pass() {
+        // Han-only strings get the JP romaji pass first; ib-romaji finds
+        // 日本語 as a single dictionary word ("nippongo"). Result is ASCII
+        // and doesn't hit the `?` fallback.
+        let out = to_macroman("日本語");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.is_ascii(), "expected ASCII romanization, got {s:?}");
+        assert!(!s.contains('?'), "expected no fallbacks, got {s:?}");
+        assert_eq!(s, "nippongo");
+    }
+
+    #[test]
+    fn hiragana_and_katakana_romanize() {
+        // Pure kana → straight romaji from the dict.
+        assert_eq!(to_macroman("ありがとう"), b"arigatou");
+        assert_eq!(to_macroman("カタカナ"), b"katakana");
+    }
+
+    #[test]
+    fn mixed_script_leaves_latin_alone() {
+        // Non-JP surrounding text must not get mangled by the JP pass.
+        let out = to_macroman("Hello 日本 world");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.starts_with("Hello "));
+        assert!(s.ends_with(" world"));
+        assert!(s.is_ascii());
+    }
+
+    #[test]
+    fn unmatched_kanji_falls_through_to_deunicode() {
+        // A very rare CJK Ext-A char that isn't in ib-romaji's dict; the
+        // deunicode fallback should still give something readable rather
+        // than `?`. This validates the two-stage pipeline: JP romaji pass,
+        // then per-char lookup, then deunicode.
+        let out = to_macroman("\u{3400}");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.is_ascii(), "expected ASCII fallback, got {s:?}");
+    }
+
+    #[test]
+    fn decomposed_forms_normalize_before_lookup() {
+        // NFD café: `e` U+0065 + combining acute U+0301. NFC recomposes to
+        // U+00E9, which is in the Mac Roman table at 0x8E.
+        let nfd = "cafe\u{0301}";
+        assert_eq!(to_macroman(nfd), vec![b'c', b'a', b'f', 0x8E]);
+    }
+
+    #[test]
+    fn stray_combining_marks_are_dropped() {
+        // A combining mark with no base to compose with should silently
+        // vanish rather than emit `?`.
+        assert_eq!(to_macroman("\u{0301}"), b"");
     }
 
     #[test]
