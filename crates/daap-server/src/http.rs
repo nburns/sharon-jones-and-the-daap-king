@@ -14,15 +14,27 @@ use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
 use crate::artwork::{self, Artworker, OutputVariant, Prepared};
+use crate::buffered_body::BufferedBody;
 use crate::charset::{charset_from_accept, Charset};
 use crate::content_codes;
-use crate::exact_length_reader::ExactLengthReader;
 use crate::prefix_reader::PrefixReader;
 use crate::responses;
 use crate::search;
 use crate::server_info::{self, ClientDialect, ServerInfo};
 use crate::session::SessionStore;
 use crate::transcode::{self, choose_format, client_supports_modern_codecs, ServedFormat, Transcoder};
+
+/// Cap on how much source audio we'll buffer into memory before feeding
+/// ffmpeg. Larger than any realistic single track (256 MiB is roughly
+/// 40 minutes of 24/96 FLAC or 24 hours of 320 kbps MP3). We refuse to
+/// serve anything larger rather than falling back silently to a mode
+/// that would reintroduce the pipeline-stall silence bug.
+pub const SOURCE_BUFFER_CAP: usize = 256 * 1024 * 1024;
+
+/// Cap on how much transcoded output we hold in memory ahead of the
+/// client. Above this the drainer pauses, reintroducing back-pressure
+/// only for pathological long-transcode + very slow client combos.
+pub const OUTPUT_BUFFER_CAP: usize = 128 * 1024 * 1024;
 
 pub struct HandlerState<S: MediaSource + 'static> {
     pub name: String,
@@ -628,18 +640,68 @@ async fn serve_transcoded<S: MediaSource + 'static>(
     served: ServedFormat,
     range: Option<(u64, Option<u64>)>,
 ) -> Response {
-    // Compute per-request info first: seek time, estimated total transcoded
-    // size, and the Content-Range/Content-Length for a partial response.
-    let est_total = match served {
+    // Fully drain the source into memory first. This removes the source-
+    // side back-pressure loop that used to stall ffmpeg mid-track when a
+    // slow client held the response body open: source read completes
+    // promptly, ffmpeg runs to completion at its own pace, and no
+    // network timeout can fire on a half-read source stream.
+    let source_bytes = match buffer_source(&state, db, track_id).await {
+        Ok(b) => b,
+        Err(BufferSourceError::Open) => {
+            return (StatusCode::NOT_FOUND, "source open failed").into_response_stub();
+        }
+        Err(BufferSourceError::Io(err)) => {
+            tracing::error!(?err, track_id, "source read failed");
+            return (StatusCode::BAD_GATEWAY, "source read failed").into_response_stub();
+        }
+        Err(BufferSourceError::TooLarge(n)) => {
+            tracing::error!(track_id, size = n, cap = SOURCE_BUFFER_CAP, "source exceeds buffer cap");
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "source track exceeds server buffer cap",
+            )
+                .into_response_stub();
+        }
+    };
+
+    // For ClassicAiff we need a sample-accurate byte count for the
+    // Content-Length and the AIFF `numSampleFrames` header. Metadata
+    // duration is second-accurate; ffprobe on the actual source bytes
+    // is sample-accurate. If probing fails, fall back to the metadata
+    // duration (worse but still bounded — no silence).
+    let classic_aiff_sample_count: Option<u32> =
+        if matches!(served, ServedFormat::ClassicAiff) {
+            match state
+                .transcoder
+                .probe_duration_micros_bytes(&source_bytes)
+                .await
+            {
+                Ok(Some(micros)) => Some(transcode::classic_aiff_sample_count_micros(micros)),
+                Ok(None) | Err(_) => track.duration_ms.map(|d| {
+                    (d as u64 * transcode::CLASSIC_AIFF_SAMPLE_RATE as u64 / 1000) as u32
+                }),
+            }
+        } else {
+            None
+        };
+
+    // Total transcoded byte count when we can compute it.
+    //   ClassicAiff: exact — 54-byte AIFF header + sample_count bytes of PCM.
+    //   MP3: rough CBR estimate from track duration.
+    //   ALAC: source-provided size (only accurate for the pass-through
+    //     ALAC re-container case; for FLAC→ALAC we don't know until
+    //     ffmpeg is done, so we send it chunked).
+    let est_total: Option<u64> = match served {
+        ServedFormat::ClassicAiff => {
+            classic_aiff_sample_count.map(transcode::classic_aiff_size_from_samples)
+        }
         ServedFormat::Mp3 { bitrate_kbps } => track
             .duration_ms
             .map(|d| state.transcoder.estimate_mp3_size(d, bitrate_kbps)),
         ServedFormat::Alac => track.size_bytes,
-        ServedFormat::ClassicAiff => track
-            .duration_ms
-            .map(|d| transcode::classic_aiff_size(d) as u64),
         _ => None,
     };
+
     let (start, end_incl, seek_time_ms) = match (range, est_total) {
         (Some((s, e)), Some(total)) if s < total => {
             let end = e.unwrap_or(total - 1).min(total - 1);
@@ -648,7 +710,6 @@ async fn serve_transcoded<S: MediaSource + 'static>(
                     Some(transcode::bytes_to_time_ms(s, bitrate_kbps))
                 }
                 ServedFormat::Alac => track.duration_ms.map(|d| {
-                    // ALAC is VBR — approximate by proportional-time-of-total.
                     let ratio = s as f64 / total as f64;
                     (ratio * d as f64).round().min(u32::MAX as f64) as u32
                 }),
@@ -660,64 +721,45 @@ async fn serve_transcoded<S: MediaSource + 'static>(
         _ => (0, est_total.map(|t| t.saturating_sub(1)), None),
     };
 
-    let handle = match state.source.open_stream(db, track_id).await {
-        Ok(h) => h,
-        Err(_) => return (StatusCode::NOT_FOUND, "source open failed").into_response_stub(),
-    };
-
+    let source_stream: media_source::ByteStream = Box::pin(BytesReader::new(source_bytes));
     let transcode_handle = match state
         .transcoder
-        .spawn(served, track, handle.body, seek_time_ms)
+        .spawn(served, track, source_stream, seek_time_ms)
         .await
     {
         Ok(h) => h,
         Err(err) => {
-            tracing::warn!(?err, "failed to spawn ffmpeg");
+            tracing::error!(?err, "failed to spawn ffmpeg");
             return (StatusCode::INTERNAL_SERVER_ERROR, "transcode failed").into_response_stub();
         }
     };
 
-    // For ClassicAiff, prepend our own AIFF header — ffmpeg emits raw PCM
-    // (no seekable output means it can't back-patch chunk sizes itself).
-    // Header goes only on the first response fragment; range-partial
-    // responses skip it since we're already in the data region.
-    //
-    // Both paths also wrap ffmpeg's output in an ExactLengthReader so the
-    // body matches the Content-Length exactly. `duration_ms` metadata
-    // isn't sample-accurate, so a raw ffmpeg PCM stream can end up ~10s
-    // to ~1000s of bytes short or long. A fixed Content-Length with a
-    // shorter body causes hyper to close the connection early, which
-    // classic Mac clients see as `MacTCP recv -23005`.
-    let mut resp = if matches!(served, ServedFormat::ClassicAiff) && seek_time_ms.is_none() {
-        let sample_count = track
-            .duration_ms
-            .map(|d| (d as u64 * transcode::CLASSIC_AIFF_SAMPLE_RATE as u64 / 1000) as u32)
-            .unwrap_or(0);
+    // For ClassicAiff prepend our hand-rolled AIFF header (ffmpeg
+    // can't back-patch chunk sizes over an unseekable pipe). Then wrap
+    // ffmpeg's output in a BufferedBody so a slow HTTP client can drain
+    // at its own pace without stalling ffmpeg. Any producer error is
+    // surfaced through the reader as an io::Error — no silence padding,
+    // ever.
+    let is_partial = seek_time_ms.is_some();
+    let response_body = if matches!(served, ServedFormat::ClassicAiff) && !is_partial {
+        let sample_count = classic_aiff_sample_count.unwrap_or(0);
         let header = transcode::classic_aiff_header(sample_count).to_vec();
-        let exact = ExactLengthReader::new(transcode_handle, sample_count as u64, 0);
-        let prefixed = PrefixReader::new(header, exact);
-        Response::new(Body::from_stream(ReaderStream::new(prefixed)))
-    } else if matches!(served, ServedFormat::ClassicAiff) {
-        // Range case: no header prefix, expected length is end - start + 1.
-        let expected = match (end_incl, est_total) {
-            (Some(end), Some(_)) => end - start + 1,
-            _ => 0,
-        };
-        let exact = ExactLengthReader::new(transcode_handle, expected, 0);
-        Response::new(Body::from_stream(ReaderStream::new(exact)))
+        let buffered = BufferedBody::spawn(transcode_handle, OUTPUT_BUFFER_CAP);
+        let prefixed = PrefixReader::new(header, buffered);
+        Body::from_stream(ReaderStream::new(prefixed))
     } else {
-        Response::new(Body::from_stream(ReaderStream::new(transcode_handle)))
+        let buffered = BufferedBody::spawn(transcode_handle, OUTPUT_BUFFER_CAP);
+        Body::from_stream(ReaderStream::new(buffered))
     };
+
+    let mut resp = Response::new(response_body);
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(served.content_type()),
     );
-    // Advertise Range support even for transcoded — clients can request
-    // seeks and we'll spin up a fresh ffmpeg with -ss.
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
-    let is_partial = seek_time_ms.is_some();
     if is_partial {
         if let (Some(end), Some(total)) = (end_incl, est_total) {
             let content_range = format!("bytes {}-{}/{}", start, end, total);
@@ -731,14 +773,87 @@ async fn serve_transcoded<S: MediaSource + 'static>(
         }
         *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
     } else {
-        if let Some(total) = est_total {
-            if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
-                h.insert(header::CONTENT_LENGTH, v);
+        // Only advertise Content-Length when we know it exactly.
+        // MP3/ALAC omit it and rely on chunked transfer-encoding so a
+        // small size-estimate drift can't leave hyper waiting for
+        // bytes that will never come.
+        if matches!(served, ServedFormat::ClassicAiff) {
+            if let Some(total) = est_total {
+                if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
+                    h.insert(header::CONTENT_LENGTH, v);
+                }
             }
         }
         *resp.status_mut() = StatusCode::OK;
     }
     resp
+}
+
+// ---- source buffering ----
+
+enum BufferSourceError {
+    Open,
+    Io(std::io::Error),
+    /// Source exceeded SOURCE_BUFFER_CAP; carries the byte count read
+    /// before we gave up.
+    TooLarge(usize),
+}
+
+async fn buffer_source<S: MediaSource + 'static>(
+    state: &Arc<HandlerState<S>>,
+    db: DatabaseId,
+    track_id: TrackId,
+) -> Result<bytes::Bytes, BufferSourceError> {
+    use tokio::io::AsyncReadExt;
+    let mut handle = state
+        .source
+        .open_stream(db, track_id)
+        .await
+        .map_err(|_| BufferSourceError::Open)?;
+    // Preallocate when the source told us the size.
+    let mut buf: Vec<u8> = match handle.total_bytes {
+        Some(n) if (n as usize) <= SOURCE_BUFFER_CAP => Vec::with_capacity(n as usize),
+        _ => Vec::new(),
+    };
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = handle
+            .body
+            .read(&mut chunk)
+            .await
+            .map_err(BufferSourceError::Io)?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() + n > SOURCE_BUFFER_CAP {
+            return Err(BufferSourceError::TooLarge(buf.len() + n));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    Ok(bytes::Bytes::from(buf))
+}
+
+/// AsyncRead over an owned `Bytes` buffer. Used to hand ffmpeg the fully
+/// buffered source without any additional copying.
+struct BytesReader {
+    data: bytes::Bytes,
+    pos: usize,
+}
+impl BytesReader {
+    fn new(data: bytes::Bytes) -> Self { Self { data, pos: 0 } }
+}
+impl tokio::io::AsyncRead for BytesReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let remaining = &self.data[self.pos..];
+        let n = remaining.len().min(buf.remaining());
+        buf.put_slice(&remaining[..n]);
+        self.pos += n;
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 // ---- helpers ----

@@ -165,8 +165,14 @@ impl DlnaSource {
         let friendly_name = device.friendly_name().to_string();
         let base_url = uri_to_url(device.url())?;
 
+        // Only a connect timeout — a total-request timeout would kill
+        // long-lived audio stream bodies for slow HTTP clients, and
+        // when the client is a slow classic Mac that read the bytes
+        // over 5 minutes of playback that would truncate playback. The
+        // ContentDirectory SOAP calls we make elsewhere are quick, so
+        // the missing read timeout doesn't matter there in practice.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(15))
             .build()?;
 
         // rupnp keeps controlURL private, so fetch + parse the device

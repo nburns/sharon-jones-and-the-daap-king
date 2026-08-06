@@ -110,6 +110,23 @@ pub fn classic_aiff_size(duration_ms: u32) -> u32 {
     CLASSIC_AIFF_HEADER_BYTES + data as u32
 }
 
+/// PCM sample count for a given microsecond-accurate source duration.
+/// Rounded to nearest sample; PCM at 22254 Hz has one sample every
+/// ~44.9 microseconds, so this is exact to well below one sample.
+pub fn classic_aiff_sample_count_micros(duration_micros: u64) -> u32 {
+    let samples = (duration_micros
+        .saturating_mul(CLASSIC_AIFF_SAMPLE_RATE as u64)
+        + 500_000)
+        / 1_000_000;
+    samples.min(u32::MAX as u64) as u32
+}
+
+/// Byte count for a given PCM sample count (mono 8-bit).
+pub fn classic_aiff_size_from_samples(sample_count: u32) -> u64 {
+    let bytes_per_sample = (CLASSIC_AIFF_BITS as u64 / 8) * (CLASSIC_AIFF_CHANNELS as u64);
+    CLASSIC_AIFF_HEADER_BYTES as u64 + (sample_count as u64) * bytes_per_sample
+}
+
 /// Convert a byte offset within the served AIFF into an input-time offset
 /// (in milliseconds), for `ffmpeg -ss` seek.
 pub fn classic_aiff_byte_to_time_ms(byte_offset: u64) -> u32 {
@@ -372,6 +389,47 @@ impl Transcoder {
             return Ok(None);
         }
         Ok(Some((secs * 1000.0).min(u32::MAX as f64) as u32))
+    }
+
+    /// Probe an in-memory source buffer for its exact duration in
+    /// microseconds. Feeds `bytes` to ffprobe on stdin. Used to compute
+    /// a sample-accurate Content-Length for CBR outputs (ClassicAiff)
+    /// where the metadata-derived duration is only accurate to seconds.
+    pub async fn probe_duration_micros_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> std::io::Result<Option<u64>> {
+        let mut child = Command::new(&self.config.ffprobe_path)
+            .args([
+                "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-i", "pipe:0",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let bytes_owned = bytes.to_vec();
+        let write_task = tokio::spawn(async move {
+            let _ = stdin.write_all(&bytes_owned).await;
+            let _ = stdin.shutdown().await;
+        });
+        let output = child.wait_with_output().await?;
+        let _ = write_task.await;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let s = String::from_utf8_lossy(&output.stdout);
+        let secs: f64 = match s.trim().parse() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        if !secs.is_finite() || secs <= 0.0 {
+            return Ok(None);
+        }
+        Ok(Some((secs * 1_000_000.0).min(u64::MAX as f64) as u64))
     }
 }
 
