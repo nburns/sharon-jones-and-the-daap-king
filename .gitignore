@@ -13,3 +13,6 @@
 
 # Local test scratch
 /tmp/
+
+# Local MCP server config
+.mcp.json

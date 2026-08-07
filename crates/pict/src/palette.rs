@@ -1,15 +1,12 @@
-//! The classic Mac "System Palette" — the 256-entry CLUT that Color
-//! QuickDraw used at 8-bit color depth.
+//! Classic Mac palette constants and helpers.
 //!
-//! Structure (per Inside Macintosh: Imaging with QuickDraw): a 6×6×6 web-
-//! safe-ish RGB cube (216 entries) plus 40 grayscale/system slots. This is
-//! the palette a Mac II with a color video card in 8-bit mode uses natively,
-//! so if we quantize to it there's no runtime remap on the client — the
-//! `PixMap`'s CLUT indices point directly at the display's own CLUT slots.
+//! Includes the 256-entry System Palette (8-bit color), the 16-color System
+//! 4-bit CLUT (clut resource ID 4), the 4-color Mac CLUT, and gray ramp
+//! generators for 2/4/8-bit gray depths.
 //!
-//! Slot 0 is white and slot 255 is black (Apple's CLUT is inverted vs the
-//! more-common "0=black" convention). We follow Apple's ordering exactly so
-//! the palette embedded in the PICT matches what the ROM boots with.
+//! All palette slot orderings follow Apple's convention (slot 0 = white,
+//! last slot = black) so indices embedded in PICT PixMaps map directly to
+//! the display's own CLUT slots on a stock Mac.
 
 /// One 8-bit RGB triplet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,13 +72,61 @@ const fn build_palette() -> [Rgb; 256] {
     out
 }
 
+/// Mac 4-color CLUT (clut resource ID 2): white, light gray, dark gray, black.
+pub const MAC_4_COLOR: [Rgb; 4] = [
+    Rgb::new(0xFF, 0xFF, 0xFF),
+    Rgb::new(0xBF, 0xBF, 0xBF),
+    Rgb::new(0x80, 0x80, 0x80),
+    Rgb::new(0x00, 0x00, 0x00),
+];
+
+/// Mac 16-color CLUT (clut resource ID 4), extracted from the Mac OS 9.0.4
+/// System file. Slot order: white, yellow, orange, red, magenta, purple,
+/// blue, cyan, green, dark green, brown, tan, light gray, gray, dark gray,
+/// black.
+pub const MAC_16_COLOR: [Rgb; 16] = [
+    Rgb::new(0xFF, 0xFF, 0xFF), // white
+    Rgb::new(0xFC, 0xF3, 0x05), // yellow
+    Rgb::new(0xFF, 0x64, 0x02), // orange
+    Rgb::new(0xDD, 0x08, 0x06), // red
+    Rgb::new(0xF2, 0x08, 0x84), // magenta
+    Rgb::new(0x46, 0x00, 0xA5), // purple
+    Rgb::new(0x00, 0x00, 0xD4), // blue
+    Rgb::new(0x02, 0xAB, 0xEA), // cyan
+    Rgb::new(0x1F, 0xB7, 0x14), // green
+    Rgb::new(0x00, 0x64, 0x11), // dark green
+    Rgb::new(0x56, 0x2C, 0x05), // brown
+    Rgb::new(0x90, 0x71, 0x3A), // tan
+    Rgb::new(0xC0, 0xC0, 0xC0), // light gray
+    Rgb::new(0x80, 0x80, 0x80), // gray
+    Rgb::new(0x40, 0x40, 0x40), // dark gray
+    Rgb::new(0x00, 0x00, 0x00), // black
+];
+
+/// Produce an evenly-spaced gray ramp with `N` entries, including both
+/// 0 (black) and 255 (white) endpoints. For N=1 returns [255].
+pub fn gray_ramp<const N: usize>() -> [Rgb; N] {
+    let mut out = [Rgb::new(0, 0, 0); N];
+    if N == 1 {
+        out[0] = Rgb::new(255, 255, 255);
+        return out;
+    }
+    let mut i = 0;
+    while i < N {
+        let v = (i * 255 / (N - 1)) as u8;
+        out[i] = Rgb::new(v, v, v);
+        i += 1;
+    }
+    out
+}
+
 /// Find the palette index whose color is nearest (Euclidean distance in
-/// RGB space) to `p`. Brute force over 256 entries.
-pub fn nearest_index(palette: &[Rgb; 256], p: Rgb) -> u8 {
+/// RGB space) to `p`. Brute force over the full palette.
+pub fn nearest_index(palette: &[Rgb], p: Rgb) -> u8 {
     let mut best_i: u8 = 0;
     let mut best_d: u32 = u32::MAX;
     let mut i = 0usize;
-    while i < 256 {
+    while i < palette.len() {
         let e = palette[i];
         let dr = (p.r as i32 - e.r as i32) as i32;
         let dg = (p.g as i32 - e.g as i32) as i32;
@@ -129,6 +174,33 @@ mod tests {
         // (250, 5, 5) should snap to (255, 0, 0)
         let i = nearest_index(&MAC_SYSTEM_PALETTE, Rgb::new(250, 5, 5));
         assert_eq!(MAC_SYSTEM_PALETTE[i as usize], Rgb::new(255, 0, 0));
+    }
+
+    #[test]
+    fn gray_ramp_endpoints() {
+        let r2 = gray_ramp::<2>();
+        assert_eq!(r2[0], Rgb::new(0, 0, 0));
+        assert_eq!(r2[1], Rgb::new(255, 255, 255));
+
+        let r4 = gray_ramp::<4>();
+        assert_eq!(r4[0], Rgb::new(0, 0, 0));
+        assert_eq!(r4[3], Rgb::new(255, 255, 255));
+
+        let r256 = gray_ramp::<256>();
+        assert_eq!(r256[0], Rgb::new(0, 0, 0));
+        assert_eq!(r256[255], Rgb::new(255, 255, 255));
+    }
+
+    #[test]
+    fn mac_4_color_white_and_black() {
+        assert_eq!(MAC_4_COLOR[0], Rgb::new(255, 255, 255));
+        assert_eq!(MAC_4_COLOR[3], Rgb::new(0, 0, 0));
+    }
+
+    #[test]
+    fn mac_16_color_white_and_black() {
+        assert_eq!(MAC_16_COLOR[0], Rgb::new(255, 255, 255));
+        assert_eq!(MAC_16_COLOR[15], Rgb::new(0, 0, 0));
     }
 
     #[test]

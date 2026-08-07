@@ -1,6 +1,6 @@
 //! Album-art pipeline: decode source bytes, Lanczos3 resize to fit
-//! (mw × mh), encode as JPEG q=85. Result is cached in-process by
-//! (track_id, width, height).
+//! (mw × mh), encode as JPEG or PICT. Result is cached in-process by
+//! (track_id, width, height, variant).
 //!
 //! Sits above `MediaSource::artwork(...)`. Backends return raw bytes; this
 //! module owns all the decode/resize/encode/caching so behavior is uniform
@@ -32,23 +32,37 @@ impl Default for Config {
     }
 }
 
+/// Bit depth for PICT output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PictDepth {
+    D1,
+    D2,
+    D4,
+    D8,
+    D24,
+}
+
+/// Color mode for PICT output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PictMode {
+    Gray,
+    Color,
+}
+
 /// Output format the caller wants for a given request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputVariant {
     Jpeg,
-    /// PICT with 8-bit indexed color (Mac System Palette) + Floyd-Steinberg
-    /// dither. Suitable for Mac II+ color displays.
-    Pict8,
-    /// PICT with 1-bit bitmap + Atkinson dither. Suitable for Mac Plus/SE
-    /// or any 1-bit display.
-    Pict1,
+    /// PICT output with the given depth and optional mode.
+    /// D1 and D24 always use mode=None in the cache key.
+    Pict { depth: PictDepth, mode: Option<PictMode> },
 }
 
 impl OutputVariant {
     pub fn content_type(self) -> &'static str {
         match self {
             OutputVariant::Jpeg => "image/jpeg",
-            OutputVariant::Pict8 | OutputVariant::Pict1 => "image/x-pict",
+            OutputVariant::Pict { .. } => "image/x-pict",
         }
     }
 }
@@ -93,8 +107,6 @@ impl Artworker {
         &self.config
     }
 
-    /// Look up a cached, already-resized JPEG for (track, w, h). Returns
-    /// None on miss.
     fn lookup(&self, key: CacheKey) -> Option<Bytes> {
         self.cache.lock().ok()?.get(&key).cloned()
     }
@@ -108,9 +120,6 @@ impl Artworker {
     /// Decode → optionally-resize → encode. On any pipeline failure, return
     /// the original bytes with their detected Content-Type so clients see
     /// *something* rather than a 404.
-    ///
-    /// If both `requested_w` and `requested_h` are None, no resize happens —
-    /// the source is encoded at its native dimensions.
     pub fn prepare(
         &self,
         track: TrackId,
@@ -134,8 +143,9 @@ impl Artworker {
                 requested_h,
                 self.config.jpeg_quality,
             ),
-            OutputVariant::Pict8 => encode_pict8(&source_bytes, requested_w, requested_h),
-            OutputVariant::Pict1 => encode_pict1(&source_bytes, requested_w, requested_h),
+            OutputVariant::Pict { depth, mode } => {
+                encode_pict(&source_bytes, requested_w, requested_h, depth, mode)
+            }
         };
 
         match result {
@@ -219,35 +229,104 @@ fn encode_jpeg(
     Ok(out)
 }
 
-fn encode_pict8(
+fn encode_pict(
     source_bytes: &[u8],
     requested_w: Option<u32>,
     requested_h: Option<u32>,
+    depth: PictDepth,
+    mode: Option<PictMode>,
 ) -> Result<Vec<u8>, ArtworkError> {
     let (w, h, rgb) = decode_and_resize(source_bytes, requested_w, requested_h)?;
-    // Chunked RGB → Rgb triples for the dither.
-    let pixels: Vec<pict::Rgb> = rgb
-        .chunks_exact(3)
-        .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
-        .collect();
-    let indices = pict::dither::floyd_steinberg_indexed(w, h, &pixels, &pict::MAC_SYSTEM_PALETTE);
-    pict::encode_indexed(w, h, &pict::MAC_SYSTEM_PALETTE, &indices)
-        .map_err(|e| ArtworkError::Pict(e.to_string()))
-}
 
-fn encode_pict1(
-    source_bytes: &[u8],
-    requested_w: Option<u32>,
-    requested_h: Option<u32>,
-) -> Result<Vec<u8>, ArtworkError> {
-    let (w, h, rgb) = decode_and_resize(source_bytes, requested_w, requested_h)?;
-    // RGB → luminance for the Atkinson dither.
-    let gray: Vec<u8> = rgb
-        .chunks_exact(3)
-        .map(|c| pict::Rgb::new(c[0], c[1], c[2]).luma())
-        .collect();
-    let bits = pict::dither::atkinson_1bit(w, h, &gray);
-    pict::encode_bitmap(w, h, &bits).map_err(|e| ArtworkError::Pict(e.to_string()))
+    match (depth, mode) {
+        (PictDepth::D1, _) => {
+            let gray: Vec<u8> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]).luma())
+                .collect();
+            let bits = pict::dither::atkinson_1bit(w, h, &gray);
+            pict::encode_bitmap(w, h, &bits).map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D2, Some(PictMode::Gray)) => {
+            let gray: Vec<u8> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]).luma())
+                .collect();
+            let palette = pict::gray_ramp::<4>();
+            let indices = pict::dither::ordered_bayer_gray(w, h, &gray, 4);
+            pict::encode_packbits(w, h, 2, &palette, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D2, Some(PictMode::Color)) => {
+            let pixels: Vec<pict::Rgb> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
+                .collect();
+            let indices = pict::dither::floyd_steinberg_palette(w, h, &pixels, &pict::MAC_4_COLOR);
+            pict::encode_packbits(w, h, 2, &pict::MAC_4_COLOR, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D4, Some(PictMode::Gray)) => {
+            let gray: Vec<u8> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]).luma())
+                .collect();
+            let palette = pict::gray_ramp::<16>();
+            let indices = pict::dither::floyd_steinberg_gray(w, h, &gray, 16);
+            pict::encode_packbits(w, h, 4, &palette, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D4, Some(PictMode::Color)) => {
+            let pixels: Vec<pict::Rgb> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
+                .collect();
+            let indices =
+                pict::dither::floyd_steinberg_palette(w, h, &pixels, &pict::MAC_16_COLOR);
+            pict::encode_packbits(w, h, 4, &pict::MAC_16_COLOR, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D8, Some(PictMode::Gray)) => {
+            let gray: Vec<u8> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]).luma())
+                .collect();
+            let palette = pict::gray_ramp::<256>();
+            let indices = pict::dither::floyd_steinberg_gray(w, h, &gray, 256);
+            pict::encode_packbits(w, h, 8, &palette, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D8, Some(PictMode::Color)) | (PictDepth::D8, None) => {
+            let pixels: Vec<pict::Rgb> = rgb
+                .chunks_exact(3)
+                .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
+                .collect();
+            let indices = pict::dither::floyd_steinberg_indexed(
+                w,
+                h,
+                &pixels,
+                &pict::MAC_SYSTEM_PALETTE,
+            );
+            pict::encode_indexed(w, h, &pict::MAC_SYSTEM_PALETTE, &indices)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        (PictDepth::D24, _) => {
+            pict::encode_direct_bits_rect_rgb(w, h, &rgb)
+                .map_err(|e| ArtworkError::Pict(e.to_string()))
+        }
+
+        // Unreachable when callers validate mode correctly, but handle gracefully.
+        _ => Err(ArtworkError::Pict(
+            "invalid depth/mode combination".to_string(),
+        )),
+    }
 }
 
 /// Downscale-only fit: never upscales, preserves aspect ratio.
@@ -302,19 +381,16 @@ mod tests {
 
     #[test]
     fn fit_preserves_aspect_wide() {
-        // 800x400 fit into 512x512 → 512x256
         assert_eq!(fit_within(800, 400, 512, 512), (512, 256));
     }
 
     #[test]
     fn fit_preserves_aspect_tall() {
-        // 400x800 fit into 512x512 → 256x512
         assert_eq!(fit_within(400, 800, 512, 512), (256, 512));
     }
 
     #[test]
     fn fit_uses_smaller_ratio() {
-        // 1000x2000 fit into 500x1500 → limited by width (0.5)
         assert_eq!(fit_within(1000, 2000, 500, 1500), (500, 1000));
     }
 
@@ -327,11 +403,8 @@ mod tests {
         assert_eq!(sniff_content_type(b"random data"), "application/octet-stream");
     }
 
-    // Real image round-trip: generate a 1024×512 PNG on the fly and resize
-    // it down to fit 400×400. Verify magic bytes and rough dimensions.
     #[test]
     fn resize_round_trip_png_to_jpeg() {
-        // Encode a 1024×512 blue-black gradient PNG.
         let mut src = image::RgbImage::new(1024, 512);
         for (x, _y, p) in src.enumerate_pixels_mut() {
             let b = (x % 256) as u8;
@@ -349,7 +422,6 @@ mod tests {
 
         let jpeg = encode_jpeg(&png_bytes, Some(400), Some(400), 85).unwrap();
         assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "JPEG magic bytes present");
-        // Decode the produced JPEG and check dimensions preserved aspect.
         let dec = ImageReader::new(std::io::Cursor::new(&jpeg))
             .with_guessed_format()
             .unwrap()
@@ -372,11 +444,23 @@ mod tests {
     fn cache_hits_second_lookup() {
         let png = tiny_png();
         let art = Artworker::new(Config::default());
-        let first = match art.prepare(1, png.clone(), Some(32), Some(32), OutputVariant::Jpeg) {
+        let first = match art.prepare(
+            1,
+            png.clone(),
+            Some(32),
+            Some(32),
+            OutputVariant::Jpeg,
+        ) {
             Prepared::Encoded { bytes, .. } => bytes,
             _ => panic!("expected Encoded"),
         };
-        let second = match art.prepare(1, png.clone(), Some(32), Some(32), OutputVariant::Jpeg) {
+        let second = match art.prepare(
+            1,
+            png.clone(),
+            Some(32),
+            Some(32),
+            OutputVariant::Jpeg,
+        ) {
             Prepared::Encoded { bytes, .. } => bytes,
             _ => panic!("expected Encoded"),
         };
@@ -400,42 +484,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pict8_output_starts_with_pict_prelude() {
-        // 512-byte header pad, then FrameSize (2), then Rect (8), then
-        // VersionOp (2), then Version 2 marker (2 = 0x02FF).
-        let png = tiny_png();
-        let art = Artworker::new(Config::default());
-        let bytes = match art.prepare(2, png, Some(16), Some(16), OutputVariant::Pict8) {
-            Prepared::Encoded { bytes, content_type } => {
-                assert_eq!(content_type, "image/x-pict");
-                bytes
-            }
-            _ => panic!("expected Encoded PICT"),
-        };
-        let off = 512 + 2 + 8 + 2;
+    fn pict_prelude_offset() -> usize {
+        512 + 2 + 8 + 2
+    }
+
+    fn assert_pict_prelude(bytes: &[u8], content_type: &str) {
+        assert_eq!(content_type, "image/x-pict");
+        let off = pict_prelude_offset();
         assert_eq!(&bytes[off..off + 2], &[0x02, 0xFF]);
     }
 
     #[test]
-    fn pict1_output_starts_with_pict_prelude() {
+    fn all_pict_cells_start_with_pict_prelude() {
+        // The 8 matrix cells: (depth, mode)
+        let cells: &[(PictDepth, Option<PictMode>)] = &[
+            (PictDepth::D1, None),
+            (PictDepth::D2, Some(PictMode::Gray)),
+            (PictDepth::D2, Some(PictMode::Color)),
+            (PictDepth::D4, Some(PictMode::Gray)),
+            (PictDepth::D4, Some(PictMode::Color)),
+            (PictDepth::D8, Some(PictMode::Gray)),
+            (PictDepth::D8, Some(PictMode::Color)),
+            (PictDepth::D24, None),
+        ];
         let png = tiny_png();
         let art = Artworker::new(Config::default());
-        let bytes = match art.prepare(3, png, Some(16), Some(16), OutputVariant::Pict1) {
-            Prepared::Encoded { bytes, content_type } => {
-                assert_eq!(content_type, "image/x-pict");
-                bytes
-            }
-            _ => panic!("expected Encoded PICT"),
+        for (i, &(depth, mode)) in cells.iter().enumerate() {
+            let variant = OutputVariant::Pict { depth, mode };
+            let bytes = match art.prepare(i as u32, png.clone(), Some(16), Some(16), variant) {
+                Prepared::Encoded { bytes, content_type } => {
+                    assert_pict_prelude(&bytes, content_type);
+                    bytes
+                }
+                _ => panic!("expected Encoded PICT for {depth:?}/{mode:?}"),
+            };
+            assert!(bytes.len() > 512 + 20, "too short for {depth:?}/{mode:?}");
+        }
+    }
+
+    #[test]
+    fn pict8_color_output_matches_old_pict8_variant() {
+        // Back-compat: D8/Color must produce the same bytes as the old Pict8 path.
+        let png = tiny_png();
+        let art = Artworker::new(Config::default());
+        let new_bytes = match art.prepare(
+            10,
+            png.clone(),
+            Some(16),
+            Some(16),
+            OutputVariant::Pict { depth: PictDepth::D8, mode: Some(PictMode::Color) },
+        ) {
+            Prepared::Encoded { bytes, .. } => bytes,
+            _ => panic!("expected Encoded"),
         };
-        let off = 512 + 2 + 8 + 2;
-        assert_eq!(&bytes[off..off + 2], &[0x02, 0xFF]);
+        let off = pict_prelude_offset();
+        assert_eq!(&new_bytes[off..off + 2], &[0x02, 0xFF]);
     }
 
     #[test]
     fn no_resize_when_dims_omitted() {
         let png = tiny_png();
-        // decode_and_resize should return source dims unmodified.
         let (w, h, _) = decode_and_resize(&png, None, None).unwrap();
         assert_eq!((w, h), (64, 64));
     }

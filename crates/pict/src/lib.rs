@@ -1,23 +1,30 @@
 //! Encoder for the classic Mac PICT image format (Version 2).
 //!
-//! Two entry points:
-//!   * [`encode_indexed`] — 8-bit indexed color with a caller-supplied
-//!     256-entry RGB palette. Emits `PackBitsRect` opcode.
-//!   * [`encode_bitmap`]  — 1-bit black/white. Emits `BitsRect` opcode.
+//! Supported depth/mode combinations (the "matrix"):
+//!
+//! | depth | mode  | Encoder              | Opcode       |
+//! |-------|-------|----------------------|--------------|
+//! | 1     | -     | BitsRect + Atkinson  | 0x0090       |
+//! | 2     | gray  | PackBitsRect 2-bit   | 0x0098       |
+//! | 2     | color | PackBitsRect 2-bit   | 0x0098       |
+//! | 4     | gray  | PackBitsRect 4-bit   | 0x0098       |
+//! | 4     | color | PackBitsRect 4-bit   | 0x0098       |
+//! | 8     | gray  | PackBitsRect 8-bit   | 0x0098       |
+//! | 8     | color | PackBitsRect 8-bit   | 0x0098       |
+//! | 24    | -     | DirectBitsRect       | 0x009A       |
 //!
 //! Companion modules:
-//!   * [`palette`] — the classic Mac System Palette as a `[Rgb; 256]` const.
-//!   * [`dither`]  — Floyd-Steinberg (indexed) and Atkinson (1-bit) dithers,
-//!                   both serpentine.
+//!   * [`palette`] — System Palette, 16-color, 4-color, gray ramp helpers.
+//!   * [`dither`]  — Floyd-Steinberg, Atkinson, Bayer ordered dithers.
 //!
-//! No runtime deps. All output is big-endian (PICT convention).
+//! No runtime deps. All output is big-endian.
 
 pub mod dither;
 pub mod encoder;
 pub mod palette;
 
-pub use encoder::{encode_bitmap, encode_indexed};
-pub use palette::{Rgb, MAC_SYSTEM_PALETTE};
+pub use encoder::{encode_bitmap, encode_direct_bits_rect_rgb, encode_indexed, encode_packbits};
+pub use palette::{gray_ramp, Rgb, MAC_16_COLOR, MAC_4_COLOR, MAC_SYSTEM_PALETTE};
 
 /// Error returned by encode functions.
 #[derive(Debug, thiserror::Error)]
@@ -30,4 +37,6 @@ pub enum PictError {
     HeightTooLarge(u32),
     #[error("indices length ({got}) doesn't match width×height ({expected})")]
     LenMismatch { got: usize, expected: usize },
+    #[error("pixel size {0} is not valid (must be 1, 2, 4, or 8)")]
+    InvalidPixelSize(u16),
 }

@@ -1,29 +1,26 @@
-//! Error-diffusion dithering. Two algorithms, both scanning in serpentine
-//! (boustrophedon) order to avoid the directional worm artifacts you get
-//! from monotonic left-to-right diffusion.
+//! Error-diffusion and ordered dithering algorithms.
 //!
-//!   * [`floyd_steinberg_indexed`] — RGB → 8-bit indexed against a fixed
-//!     palette. 100% of the quantization error propagates to 4 neighbours.
-//!   * [`atkinson_1bit`]          — grayscale → black/white. 75% of the
-//!     error propagates to 6 neighbours (1/8 each); the missing 25% is
-//!     discarded on purpose, brightening the output slightly. This is the
-//!     algorithm Bill Atkinson designed for the original Mac and used in
-//!     MacPaint / HyperCard; it gives 1-bit images a characteristic
-//!     high-contrast "Mac look".
+//!   * [`floyd_steinberg_palette`] — RGB → indexed against any palette slice.
+//!   * [`floyd_steinberg_indexed`] — thin wrapper over the above for 256-entry
+//!     palettes (backwards-compatible call site).
+//!   * [`floyd_steinberg_gray`]    — grayscale → N-level gray index.
+//!   * [`ordered_bayer_gray`]      — grayscale → N-level gray index via 4×4
+//!     Bayer ordered dither (no error diffusion).
+//!   * [`atkinson_1bit`]           — grayscale → 1-bit. 75% error propagated
+//!     to 6 neighbours; characteristic Mac high-contrast look.
 
 use crate::palette::{nearest_index, Rgb};
 
-/// Floyd-Steinberg dither RGB → indexed. Input is width×height RGB pixels;
-/// output is width×height palette indices. Serpentine scan.
-pub fn floyd_steinberg_indexed(
+/// Floyd-Steinberg dither RGB → indexed against any palette. Input is
+/// width×height RGB pixels; output is width×height palette indices.
+/// Serpentine scan.
+pub fn floyd_steinberg_palette(
     width: u32,
     height: u32,
     rgb: &[Rgb],
-    palette: &[Rgb; 256],
+    palette: &[Rgb],
 ) -> Vec<u8> {
     assert_eq!(rgb.len(), (width * height) as usize);
-    // Work in i16 so accumulated error can go negative/large without
-    // saturation until we snap back at output time.
     let mut buf: Vec<[i16; 3]> = rgb
         .iter()
         .map(|p| [p.r as i16, p.g as i16, p.b as i16])
@@ -34,7 +31,6 @@ pub fn floyd_steinberg_indexed(
 
     for y in 0..h {
         let ltr = y % 2 == 0;
-        // Iterate x in the current row's scan direction.
         let xs: Box<dyn Iterator<Item = usize>> = if ltr {
             Box::new(0..w)
         } else {
@@ -44,13 +40,7 @@ pub fn floyd_steinberg_indexed(
             let idx_here = y * w + x;
             let p = buf[idx_here];
             let clamp = |v: i16| -> u8 {
-                if v < 0 {
-                    0
-                } else if v > 255 {
-                    255
-                } else {
-                    v as u8
-                }
+                if v < 0 { 0 } else if v > 255 { 255 } else { v as u8 }
             };
             let snapped = Rgb::new(clamp(p[0]), clamp(p[1]), clamp(p[2]));
             let pi = nearest_index(palette, snapped);
@@ -61,14 +51,6 @@ pub fn floyd_steinberg_indexed(
                 p[1] - picked.g as i16,
                 p[2] - picked.b as i16,
             ];
-            // Distribute error. Neighbour offsets differ depending on scan
-            // direction so serpentine scanning always spreads "forward"
-            // (into un-processed pixels).
-            //
-            // Left→right (canonical FS):
-            //   [+1, 0] 7/16, [-1,+1] 3/16, [0,+1] 5/16, [+1,+1] 1/16
-            // Right→left (mirror):
-            //   [-1, 0] 7/16, [+1,+1] 3/16, [0,+1] 5/16, [-1,+1] 1/16
             let (dx_forward, mirror) = if ltr { (1i32, 1i32) } else { (-1i32, -1i32) };
             let spread = |buf: &mut [[i16; 3]], nx: i32, ny: i32, num: i16| {
                 if nx < 0 || nx >= w as i32 || ny >= h as i32 {
@@ -76,7 +58,6 @@ pub fn floyd_steinberg_indexed(
                 }
                 let ni = (ny as usize) * w + (nx as usize);
                 for c in 0..3 {
-                    // Multiply-then-divide to keep sign correct.
                     let d = (err[c] * num) / 16;
                     buf[ni][c] = buf[ni][c].saturating_add(d);
                 }
@@ -87,6 +68,94 @@ pub fn floyd_steinberg_indexed(
             spread(&mut buf, x_i - mirror, y_i + 1, 3);
             spread(&mut buf, x_i, y_i + 1, 5);
             spread(&mut buf, x_i + mirror, y_i + 1, 1);
+        }
+    }
+    out
+}
+
+/// Floyd-Steinberg dither RGB → indexed against a 256-entry palette.
+/// Thin wrapper over [`floyd_steinberg_palette`] for backwards compatibility.
+pub fn floyd_steinberg_indexed(
+    width: u32,
+    height: u32,
+    rgb: &[Rgb],
+    palette: &[Rgb; 256],
+) -> Vec<u8> {
+    floyd_steinberg_palette(width, height, rgb, palette)
+}
+
+/// Floyd-Steinberg dither grayscale → N-level gray index. Input is
+/// width×height luminance bytes (0..=255); output is width×height indices
+/// in `0..levels`. Serpentine scan.
+pub fn floyd_steinberg_gray(width: u32, height: u32, gray: &[u8], levels: u32) -> Vec<u8> {
+    assert!(levels >= 2);
+    assert_eq!(gray.len(), (width * height) as usize);
+    let w = width as usize;
+    let h = height as usize;
+    let mut buf: Vec<i16> = gray.iter().map(|&v| v as i16).collect();
+    let mut out = vec![0u8; w * h];
+
+    for y in 0..h {
+        let ltr = y % 2 == 0;
+        let xs: Box<dyn Iterator<Item = usize>> = if ltr {
+            Box::new(0..w)
+        } else {
+            Box::new((0..w).rev())
+        };
+        for x in xs {
+            let idx_here = y * w + x;
+            let v = buf[idx_here].clamp(0, 255) as u32;
+            let idx = ((v * (levels - 1) + 127) / 255).min(levels - 1) as u8;
+            out[idx_here] = idx;
+            let quantized = (idx as u32 * 255 / (levels - 1)) as i16;
+            let err = buf[idx_here].clamp(0, 255) - quantized;
+            let mirror: i32 = if ltr { 1 } else { -1 };
+            let spread = |buf: &mut [i16], nx: i32, ny: i32, num: i16| {
+                if nx < 0 || nx >= w as i32 || ny >= h as i32 {
+                    return;
+                }
+                let ni = (ny as usize) * w + (nx as usize);
+                let d = (err * num) / 16;
+                buf[ni] = buf[ni].saturating_add(d);
+            };
+            let x_i = x as i32;
+            let y_i = y as i32;
+            spread(&mut buf, x_i + mirror, y_i, 7);
+            spread(&mut buf, x_i - mirror, y_i + 1, 3);
+            spread(&mut buf, x_i, y_i + 1, 5);
+            spread(&mut buf, x_i + mirror, y_i + 1, 1);
+        }
+    }
+    out
+}
+
+/// 4×4 Bayer ordered dither grayscale → N-level gray index. Input is
+/// width×height luminance bytes (0..=255); output is width×height indices
+/// in `0..levels`.
+pub fn ordered_bayer_gray(width: u32, height: u32, gray: &[u8], levels: u32) -> Vec<u8> {
+    assert!(levels >= 2);
+    assert_eq!(gray.len(), (width * height) as usize);
+    #[rustfmt::skip]
+    const BAYER4: [[u32; 4]; 4] = [
+        [ 0,  8,  2, 10],
+        [12,  4, 14,  6],
+        [ 3, 11,  1,  9],
+        [15,  7, 13,  5],
+    ];
+    let w = width as usize;
+    let h = height as usize;
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let v = gray[y * w + x] as i32;
+            // Map the Bayer matrix value into a signed threshold centered at 0.
+            // BAYER4 values are 0..=15; bias to -8..=7 then scale to ±(127/(levels-1)).
+            let bayer = BAYER4[y & 3][x & 3] as i32;
+            let half_step = 128 / levels as i32;
+            let threshold = (bayer - 8) * half_step / 8;
+            let adjusted = (v + threshold).clamp(0, 255) as u32;
+            let idx = ((adjusted * (levels - 1) + 127) / 255).min(levels - 1) as u8;
+            out[y * w + x] = idx;
         }
     }
     out
@@ -207,5 +276,43 @@ mod tests {
         assert_eq!(atkinson_1bit(5, 1, &vec![0u8; 5]).len(), 1);
         assert_eq!(atkinson_1bit(12, 1, &vec![0u8; 12]).len(), 2);
         assert_eq!(atkinson_1bit(16, 1, &vec![0u8; 16]).len(), 2);
+    }
+
+    #[test]
+    fn fs_palette_all_black_stays_black() {
+        use crate::palette::MAC_4_COLOR;
+        let src = vec![Rgb::new(0, 0, 0); 16];
+        let out = floyd_steinberg_palette(4, 4, &src, &MAC_4_COLOR);
+        for &i in &out {
+            assert_eq!(MAC_4_COLOR[i as usize], Rgb::new(0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn fs_gray_all_black() {
+        let gray = vec![0u8; 16];
+        let out = floyd_steinberg_gray(4, 4, &gray, 4);
+        assert!(out.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn fs_gray_all_white() {
+        let gray = vec![255u8; 16];
+        let out = floyd_steinberg_gray(4, 4, &gray, 4);
+        assert!(out.iter().all(|&v| v == 3));
+    }
+
+    #[test]
+    fn bayer_gray_all_black() {
+        let gray = vec![0u8; 16];
+        let out = ordered_bayer_gray(4, 4, &gray, 4);
+        assert!(out.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn bayer_gray_all_white() {
+        let gray = vec![255u8; 16];
+        let out = ordered_bayer_gray(4, 4, &gray, 4);
+        assert!(out.iter().all(|&v| v == 3));
     }
 }

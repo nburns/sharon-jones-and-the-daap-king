@@ -13,7 +13,7 @@ use media_source::{DatabaseId, MediaSource, TrackId};
 use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
-use crate::artwork::{self, Artworker, OutputVariant, Prepared};
+use crate::artwork::{self, Artworker, OutputVariant, PictDepth, PictMode, Prepared};
 use crate::buffered_body::BufferedBody;
 use crate::charset::{charset_from_accept, Charset};
 use crate::content_codes;
@@ -411,6 +411,8 @@ async fn handle_container_items<S: MediaSource + 'static>(
 struct ArtworkQuery {
     mw: Option<u32>,
     mh: Option<u32>,
+    depth: Option<u32>,
+    mode: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -483,7 +485,83 @@ async fn handle_artwork<S: MediaSource + 'static>(
     Query(q): Query<ArtworkQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let variant = variant_from_accept(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
+    // Validate mw/mh.
+    if let Some(mw) = q.mw {
+        if !(1..=1024).contains(&mw) {
+            tracing::error!(mw, "artwork request rejected: mw out of range 1..=1024");
+            return (StatusCode::BAD_REQUEST, "mw must be 1..=1024").into_response_stub();
+        }
+    }
+    if let Some(mh) = q.mh {
+        if !(1..=1024).contains(&mh) {
+            tracing::error!(mh, "artwork request rejected: mh out of range 1..=1024");
+            return (StatusCode::BAD_REQUEST, "mh must be 1..=1024").into_response_stub();
+        }
+    }
+
+    // Determine variant: explicit depth/mode params override Accept header.
+    let variant = if let Some(raw_depth) = q.depth {
+        // Parse and validate depth.
+        let depth = match raw_depth {
+            1 => PictDepth::D1,
+            2 => PictDepth::D2,
+            4 => PictDepth::D4,
+            8 => PictDepth::D8,
+            24 => PictDepth::D24,
+            _ => {
+                tracing::error!(depth = raw_depth, "artwork request rejected: invalid depth");
+                return (StatusCode::BAD_REQUEST, "depth must be 1, 2, 4, 8, or 24")
+                    .into_response_stub();
+            }
+        };
+
+        // Parse and validate mode, applying strict rules.
+        let mode = match (depth, q.mode.as_deref()) {
+            // depth=1 or depth=24: mode must be absent.
+            (PictDepth::D1 | PictDepth::D24, None) => None,
+            (PictDepth::D1, Some(m)) => {
+                tracing::error!(mode = m, "artwork request rejected: mode must be absent when depth=1");
+                return (StatusCode::BAD_REQUEST, "mode must be absent when depth=1")
+                    .into_response_stub();
+            }
+            (PictDepth::D24, Some(m)) => {
+                tracing::error!(mode = m, "artwork request rejected: mode must be absent when depth=24");
+                return (StatusCode::BAD_REQUEST, "mode must be absent when depth=24")
+                    .into_response_stub();
+            }
+            // depth=2/4/8: mode must be present and valid.
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("gray")) => {
+                Some(PictMode::Gray)
+            }
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("color")) => {
+                Some(PictMode::Color)
+            }
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some(m)) => {
+                tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
+                return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
+                    .into_response_stub();
+            }
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, None) => {
+                // Absent mode for non-1/24 depths: also invalid per strict rules.
+                tracing::error!(depth = raw_depth, "artwork request rejected: mode must be present when depth is 2, 4, or 8");
+                return (StatusCode::BAD_REQUEST, "mode must be present when depth is 2, 4, or 8")
+                    .into_response_stub();
+            }
+        };
+
+        OutputVariant::Pict { depth, mode }
+    } else {
+        // No explicit depth: check mode validity if mode is present.
+        if let Some(m) = q.mode.as_deref() {
+            if m != "gray" && m != "color" {
+                tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
+                return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
+                    .into_response_stub();
+            }
+        }
+        variant_from_accept(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()))
+    };
+
     match state.source.artwork(db, track_id).await {
         Ok(Some(raw)) => {
             let prepared = state.artworker.prepare(track_id, raw, q.mw, q.mh, variant);
@@ -505,10 +583,13 @@ async fn handle_artwork<S: MediaSource + 'static>(
     }
 }
 
-/// Pick an OutputVariant based on the client's Accept header. Recognises:
-///   image/x-pict; depth=1  → Pict1
-///   image/x-pict; depth=8  → Pict8
-///   image/x-pict           → Pict8 (default depth)
+/// Pick an OutputVariant based on the client's Accept header. Explicit
+/// `depth`/`mode` query params in [`handle_artwork`] take precedence over this.
+///
+/// Recognises:
+///   image/x-pict; depth=1  → Pict { D1, None }
+///   image/x-pict; depth=8  → Pict { D8, Color }
+///   image/x-pict           → Pict { D8, Color } (default)
 /// Falls back to Jpeg for anything else (or missing header).
 fn variant_from_accept(accept: Option<&str>) -> OutputVariant {
     let a = match accept {
@@ -516,14 +597,10 @@ fn variant_from_accept(accept: Option<&str>) -> OutputVariant {
         None => return OutputVariant::Jpeg,
     };
     if a.contains("image/x-pict") {
-        // Find the MIME params after image/x-pict — poor-man's parse: look
-        // for `depth=` anywhere in the string (Accept can list multiple
-        // types so this can pick up an unrelated `depth=` in an obscure
-        // MIME extension, but no other type we care about uses that param).
         if a.contains("depth=1") {
-            return OutputVariant::Pict1;
+            return OutputVariant::Pict { depth: PictDepth::D1, mode: None };
         }
-        return OutputVariant::Pict8;
+        return OutputVariant::Pict { depth: PictDepth::D8, mode: Some(PictMode::Color) };
     }
     OutputVariant::Jpeg
 }
@@ -2124,5 +2201,292 @@ mod tests {
             }
         }
         out
+    }
+
+    // ---- artwork endpoint HTTP integration tests ----
+
+    fn tiny_png_bytes() -> Bytes {
+        use image::ImageEncoder;
+        let mut png_bytes = Vec::new();
+        let img = image::RgbImage::new(16, 16);
+        image::codecs::png::PngEncoder::new(&mut png_bytes)
+            .write_image(img.as_raw(), 16, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        Bytes::from(png_bytes)
+    }
+
+    struct ArtworkSource {
+        art: Option<Bytes>,
+    }
+
+    #[async_trait]
+    impl MediaSource for ArtworkSource {
+        async fn databases(&self) -> MSResult<Vec<Database>> {
+            Ok(vec![Database { id: 1, name: "A".into() }])
+        }
+        async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
+            Ok(vec![Track {
+                id: 1,
+                title: "T".into(),
+                artist: None, album: None, album_artist: None,
+                genre: None, track_number: None, disc_number: None,
+                year: None, duration_ms: Some(1000),
+                bitrate_kbps: Some(128), sample_rate: None,
+                size_bytes: Some(1234),
+                format: AudioFormat::Mp3,
+            }])
+        }
+        async fn playlists(&self, _db: DatabaseId) -> MSResult<Vec<Playlist>> {
+            Ok(vec![])
+        }
+        async fn open_stream(&self, _: DatabaseId, _: TrackId) -> MSResult<StreamHandle> {
+            unimplemented!()
+        }
+        async fn artwork(&self, _: DatabaseId, _: TrackId) -> MSResult<Option<Bytes>> {
+            Ok(self.art.clone())
+        }
+    }
+
+    fn artwork_app(art: Option<Bytes>) -> Router {
+        let mut cfg = crate::transcode::Config::default();
+        cfg.enabled = false;
+        router(Arc::new(HandlerState::new_with_transcode(
+            "A".into(),
+            Arc::new(ArtworkSource { art }),
+            cfg,
+        )))
+    }
+
+    #[tokio::test]
+    async fn artwork_no_artwork_returns_404() {
+        let r = artwork_app(None)
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn artwork_depth8_mode_color_returns_200_pict() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=8&mode=color")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/x-pict"
+        );
+    }
+
+    #[tokio::test]
+    async fn artwork_depth1_no_mode_returns_200_pict() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/x-pict"
+        );
+    }
+
+    #[tokio::test]
+    async fn artwork_depth24_no_mode_returns_200_pict() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=24")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/x-pict"
+        );
+    }
+
+    #[tokio::test]
+    async fn artwork_invalid_depth_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=16&mode=color")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_invalid_mode_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=8&mode=blue")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_depth1_with_mode_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=1&mode=gray")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_depth24_with_mode_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=24&mode=color")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_depth8_without_mode_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_mw_zero_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?mw=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_mw_over_1024_returns_400() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?mw=1025")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn artwork_valid_all_depth_mode_combos_return_200() {
+        let combos = [
+            "depth=2&mode=gray",
+            "depth=2&mode=color",
+            "depth=4&mode=gray",
+            "depth=4&mode=color",
+            "depth=8&mode=gray",
+            "depth=8&mode=color",
+        ];
+        for combo in combos {
+            let r = artwork_app(Some(tiny_png_bytes()))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/databases/1/items/1/extra_data/artwork?{combo}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "combo {combo} should return 200");
+            assert_eq!(
+                r.headers().get(header::CONTENT_TYPE).unwrap(),
+                "image/x-pict",
+                "combo {combo} should return image/x-pict"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn artwork_accept_header_pict_returns_pict() {
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork")
+                    .header(header::ACCEPT, "image/x-pict")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/x-pict"
+        );
+    }
+
+    #[tokio::test]
+    async fn artwork_pict_version_signature_at_known_offset() {
+        // 512-byte pad + 2 (size) + 8 (frame Rect) + 2 (VersionOp) = offset 524.
+        // Bytes at that offset should be 0x02, 0xFF (PICT v2).
+        let r = artwork_app(Some(tiny_png_bytes()))
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items/1/extra_data/artwork?depth=8&mode=color")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_of(r).await;
+        let off = 512 + 2 + 8 + 2;
+        assert_eq!(&body[off..off + 2], &[0x02, 0xFF]);
     }
 }
