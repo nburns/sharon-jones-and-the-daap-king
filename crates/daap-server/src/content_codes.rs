@@ -31,9 +31,11 @@ pub enum DmapType {
 
 use DmapType::*;
 
+type FieldEntry = (fn() -> crate::dmap::Tag, &'static str, DmapType);
+
 /// Every tag we emit in any response, with its DMAP metadata. Order isn't
-/// meaningful — iTunes builds a lookup table from these.
-fn field_table() -> &'static [(fn() -> crate::dmap::Tag, &'static str, DmapType)] {
+/// meaningful - iTunes builds a lookup table from these.
+fn field_table() -> &'static [FieldEntry] {
     &[
         // dmap.*
         (tags::status, "dmap.status", Int),

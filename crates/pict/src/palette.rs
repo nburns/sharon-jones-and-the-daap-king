@@ -128,9 +128,9 @@ pub fn nearest_index(palette: &[Rgb], p: Rgb) -> u8 {
     let mut i = 0usize;
     while i < palette.len() {
         let e = palette[i];
-        let dr = (p.r as i32 - e.r as i32) as i32;
-        let dg = (p.g as i32 - e.g as i32) as i32;
-        let db = (p.b as i32 - e.b as i32) as i32;
+        let dr = p.r as i32 - e.r as i32;
+        let dg = p.g as i32 - e.g as i32;
+        let db = p.b as i32 - e.b as i32;
         let d = (dr * dr + dg * dg + db * db) as u32;
         if d < best_d {
             best_d = d;
@@ -149,8 +149,7 @@ mod tests {
     fn palette_has_216_cube_entries() {
         // First 216 slots are the RGB cube; each component ∈ {0,51,102,153,204,255}.
         let levels = [0u8, 51, 102, 153, 204, 255];
-        for i in 0..216 {
-            let e = MAC_SYSTEM_PALETTE[i];
+        for (i, e) in MAC_SYSTEM_PALETTE.iter().enumerate().take(216) {
             assert!(levels.contains(&e.r), "unexpected R {} at {}", e.r, i);
             assert!(levels.contains(&e.g), "unexpected G {} at {}", e.g, i);
             assert!(levels.contains(&e.b), "unexpected B {} at {}", e.b, i);

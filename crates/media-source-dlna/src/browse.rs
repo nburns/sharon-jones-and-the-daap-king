@@ -296,7 +296,7 @@ struct ResEntry {
 enum Node {
     None,
     Container { id: String, title: String },
-    Item(ItemBuilder),
+    Item(Box<ItemBuilder>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -314,11 +314,10 @@ enum TextTarget {
     ItemAlbumArtUri,
 }
 
+type ParseDidlResult = Result<(Vec<(String, String)>, Vec<AudioItem>), BrowseError>;
+
 /// Parse a DIDL-Lite XML payload. Returns (child_containers, audio_items).
-fn parse_didl_lite(
-    xml: &str,
-    base_url: &Url,
-) -> Result<(Vec<(String, String)>, Vec<AudioItem>), BrowseError> {
+fn parse_didl_lite(xml: &str, base_url: &Url) -> ParseDidlResult {
     let mut reader = Reader::from_str(xml);
     // trim_text is intentionally OFF: quick-xml 0.38 splits text runs
     // around entity references (`&amp;` etc. are emitted as separate
@@ -385,10 +384,10 @@ fn parse_didl_lite(
                         }
                     }
                     "item" => {
-                        if let Node::Item(b) = std::mem::replace(&mut node, Node::None) {
-                            if let Some(item) = finalize_item(b, base_url) {
-                                items.push(item);
-                            }
+                        if let Node::Item(b) = std::mem::replace(&mut node, Node::None)
+                            && let Some(item) = finalize_item(*b, base_url)
+                        {
+                            items.push(item);
                         }
                     }
                     _ => {}
@@ -416,8 +415,10 @@ fn handle_start(
             *node = Node::Container { id, title: String::new() };
         }
         "item" => {
-            let mut b = ItemBuilder::default();
-            b.dlna_id = attr(e, b"id").unwrap_or_default();
+            let b = Box::new(ItemBuilder {
+                dlna_id: attr(e, b"id").unwrap_or_default(),
+                ..ItemBuilder::default()
+            });
             *node = Node::Item(b);
         }
         "title" => {
@@ -435,27 +436,27 @@ fn handle_start(
         "date" => *text_target = Some(TextTarget::ItemDate),
         "albumArtURI" => *text_target = Some(TextTarget::ItemAlbumArtUri),
         "res" => {
-            if let Node::Item(b) = node {
-                if b.res.is_none() {
-                    let mime = attr(e, b"protocolInfo")
-                        .and_then(|p| p.split(':').nth(2).map(str::to_string));
-                    let duration_ms = attr(e, b"duration").and_then(|s| parse_duration_ms(&s));
-                    let bitrate_kbps = attr(e, b"bitrate")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .map(|bps| bps.max(1) / 1000)
-                        .filter(|&v| v > 0);
-                    let sample_rate = attr(e, b"sampleFrequency").and_then(|s| s.parse().ok());
-                    let size_bytes = attr(e, b"size").and_then(|s| s.parse().ok());
-                    b.res = Some(ResEntry {
-                        url: String::new(),
-                        mime,
-                        duration_ms,
-                        bitrate_kbps,
-                        sample_rate,
-                        size_bytes,
-                    });
-                    *text_target = Some(TextTarget::ItemResUrl);
-                }
+            if let Node::Item(b) = node
+                && b.res.is_none()
+            {
+                let mime = attr(e, b"protocolInfo")
+                    .and_then(|p| p.split(':').nth(2).map(str::to_string));
+                let duration_ms = attr(e, b"duration").and_then(|s| parse_duration_ms(&s));
+                let bitrate_kbps = attr(e, b"bitrate")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|bps| bps.max(1) / 1000)
+                    .filter(|&v| v > 0);
+                let sample_rate = attr(e, b"sampleFrequency").and_then(|s| s.parse().ok());
+                let size_bytes = attr(e, b"size").and_then(|s| s.parse().ok());
+                b.res = Some(ResEntry {
+                    url: String::new(),
+                    mime,
+                    duration_ms,
+                    bitrate_kbps,
+                    sample_rate,
+                    size_bytes,
+                });
+                *text_target = Some(TextTarget::ItemResUrl);
             }
         }
         _ => {}

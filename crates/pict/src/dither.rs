@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn atkinson_pure_black_input_all_zero_bits() {
-        let out = atkinson_1bit(16, 4, &vec![0u8; 64]);
+        let out = atkinson_1bit(16, 4, &[0u8; 64]);
         assert!(out.iter().all(|&b| b == 0));
         assert_eq!(out.len(), 2 * 4); // (16+7)/8 = 2 bytes/row × 4 rows
     }
@@ -255,14 +255,14 @@ mod tests {
     #[test]
     fn atkinson_pure_white_input_all_ones_within_width() {
         // 8-wide row: full byte of 0xFF, no padding bits.
-        let out = atkinson_1bit(8, 2, &vec![255u8; 16]);
+        let out = atkinson_1bit(8, 2, &[255u8; 16]);
         assert_eq!(out, vec![0xFF, 0xFF]);
     }
 
     #[test]
     fn atkinson_msb_first_layout() {
         // Single pixel white in the top-left corner, everything else black.
-        let mut src = vec![0u8; 8 * 1];
+        let mut src = vec![0u8; 8];
         src[0] = 255;
         let out = atkinson_1bit(8, 1, &src);
         // MSB-first means x=0 goes in the top bit → 0b1000_0000.
@@ -273,9 +273,9 @@ mod tests {
     #[test]
     fn atkinson_row_stride_pads_to_byte() {
         // 5px wide → stride 1 byte; 12px wide → stride 2 bytes; 16px → 2.
-        assert_eq!(atkinson_1bit(5, 1, &vec![0u8; 5]).len(), 1);
-        assert_eq!(atkinson_1bit(12, 1, &vec![0u8; 12]).len(), 2);
-        assert_eq!(atkinson_1bit(16, 1, &vec![0u8; 16]).len(), 2);
+        assert_eq!(atkinson_1bit(5, 1, &[0u8; 5]).len(), 1);
+        assert_eq!(atkinson_1bit(12, 1, &[0u8; 12]).len(), 2);
+        assert_eq!(atkinson_1bit(16, 1, &[0u8; 16]).len(), 2);
     }
 
     #[test]

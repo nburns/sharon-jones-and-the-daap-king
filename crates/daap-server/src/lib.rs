@@ -10,6 +10,7 @@ pub mod responses;
 pub mod search;
 pub mod server_info;
 pub mod session;
+pub mod sort;
 pub mod tags;
 pub mod transcode;
 

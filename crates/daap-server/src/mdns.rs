@@ -1,20 +1,34 @@
 //! Bonjour/mDNS advertisement of the DAAP service.
 //!
 //! On macOS we delegate to the system `dns-sd` CLI because the pure-Rust
-//! `mdns-sd` crate loses to macOS's system mDNSResponder for UDP 5353 — the
+//! `mdns-sd` crate loses to macOS's system mDNSResponder for UDP 5353 - the
 //! resulting advertisement is visible to local queries but not multicast onto
 //! the LAN, so old iTunes clients on other hosts never see the A record for
 //! our hostname.  On other platforms we keep the in-process `mdns-sd` path.
+//!
+//! # Teardown contract
+//!
+//! Prefer calling `Advertisement::stop().await` to ensure an mDNS goodbye
+//! packet (TTL=0) is sent before the process exits. `Drop` is a best-effort
+//! safety net and logs a warning if it fires in place of `stop()`.
+//!
+//! For synchronous exit paths (panic hooks, signal handlers), obtain a
+//! `TeardownHandle` via `Advertisement::teardown_handle()` before handing
+//! the `Advertisement` to the async loop, store it somewhere reachable, and
+//! call `TeardownHandle::emergency_stop()`.
+//!
+//! SIGKILL, SIGSEGV, SIGBUS, and power loss cannot be handled; the record
+//! will expire per its announced TTL.
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::Advertisement;
+pub use macos::{Advertisement, StopError, TeardownHandle};
 
 #[cfg(not(target_os = "macos"))]
 mod portable;
 #[cfg(not(target_os = "macos"))]
-pub use portable::Advertisement;
+pub use portable::{Advertisement, StopError, TeardownHandle};
 
 /// Validate that a name is usable as-is as a DNS label (ASCII alphanumeric
 /// plus `-`). Returns an error rather than mangling the input so bad names

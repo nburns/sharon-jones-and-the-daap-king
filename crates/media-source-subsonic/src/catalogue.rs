@@ -12,7 +12,7 @@ use media_source::{AudioFormat, TrackId};
 use tokio::sync::Semaphore;
 
 use crate::client::{Client, SubsonicError};
-use crate::model::{self, Song};
+use crate::model::Song;
 
 const ALBUM_FETCH_CONCURRENCY: usize = 8;
 
@@ -99,7 +99,7 @@ pub async fn build(client: &Arc<Client>) -> std::result::Result<Catalogue, Subso
         }
     })
     .buffer_unordered(ALBUM_FETCH_CONCURRENCY)
-    .flat_map(|ids| stream::iter(ids))
+    .flat_map(stream::iter)
     .collect()
     .await;
 
@@ -125,7 +125,7 @@ pub async fn build(client: &Arc<Client>) -> std::result::Result<Catalogue, Subso
         })
         .buffer_unordered(ALBUM_FETCH_CONCURRENCY)
         .filter_map(|opt| async move { opt })
-        .flat_map(|s| stream::iter(s))
+        .flat_map(stream::iter)
         .collect()
         .await;
 

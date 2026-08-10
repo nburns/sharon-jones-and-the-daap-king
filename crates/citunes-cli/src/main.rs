@@ -2,10 +2,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use daap_server::mdns::Advertisement;
+use daap_server::mdns::{Advertisement, TeardownHandle};
 use daap_server::artwork;
 use daap_server::transcode::{self, Preset};
 use daap_server::{Config, Server};
@@ -14,6 +15,33 @@ use media_source_dlna::{cache_filename, CacheConfig, DlnaSource};
 use media_source_fs::FsSource;
 use media_source_subsonic::{Credentials, SubsonicSource};
 use url::Url;
+
+/// Process-global teardown handle for the panic hook and signal paths.
+static TEARDOWN: OnceLock<Mutex<Option<TeardownHandle>>> = OnceLock::new();
+
+fn global_teardown() -> &'static Mutex<Option<TeardownHandle>> {
+    TEARDOWN.get_or_init(|| Mutex::new(None))
+}
+
+fn register_teardown(handle: TeardownHandle) {
+    let mut guard = global_teardown().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(handle);
+}
+
+fn clear_teardown() {
+    let mut guard = global_teardown().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+fn run_emergency_stop() {
+    let handle = {
+        let mut guard = global_teardown().lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    };
+    if let Some(h) = handle {
+        h.emergency_stop();
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "citunes", about = "Serve a music library over DAAP for old iTunes clients")]
@@ -100,7 +128,7 @@ enum SourceKind {
         discover_timeout: u64,
 
         /// ContentDirectory ObjectID to start browsing from. Defaults to root
-        /// ("0"). Useful for servers with noisy hierarchies — e.g. on Plex,
+        /// ("0"). Useful for servers with noisy hierarchies - e.g. on Plex,
         /// pass the "All Artists" object id under Music to skip Video/Photos
         /// and the duplicate By-Album/By-Genre views.
         #[arg(long, default_value = "0")]
@@ -123,7 +151,7 @@ enum SourceKind {
         #[arg(long, default_value_t = 3)]
         timeout: u64,
     },
-    /// Serve a Subsonic-compatible server (Navidrome, Airsonic, Gonic, …).
+    /// Serve a Subsonic-compatible server (Navidrome, Airsonic, Gonic, ...).
     Subsonic {
         /// Base server URL, e.g. http://navidrome.local:4533
         #[arg(short = 'u', long)]
@@ -145,6 +173,13 @@ enum SourceKind {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Install panic hook before anything else so it fires on any panic path.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        run_emergency_stop();
+        prev_hook(info);
+    }));
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -202,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 DlnaSource::connect_from(&u, &root, cache).await?
             } else if let Some(name) = server {
                 // For named-discovery, cache is keyed by the resolved URL
-                // once discovery completes — do the discovery ourselves so
+                // once discovery completes - do the discovery ourselves so
                 // we know that URL up front.
                 let servers =
                     media_source_dlna::discover(Duration::from_secs(discover_timeout)).await?;
@@ -285,14 +320,51 @@ struct ServeOpts {
     artwork: artwork::Config,
 }
 
+/// Awaits any signal that should trigger a clean shutdown.
+async fn wait_for_shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut sighup = signal(SignalKind::hangup()).expect("SIGHUP handler");
+        let mut sigquit = signal(SignalKind::quit()).expect("SIGQUIT handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => { tracing::info!("received SIGINT, shutting down"); }
+            _ = sigterm.recv() => { tracing::info!("received SIGTERM, shutting down"); }
+            _ = sighup.recv() => { tracing::info!("received SIGHUP, shutting down"); }
+            _ = sigquit.recv() => { tracing::info!("received SIGQUIT, shutting down"); }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let mut cb = ctrl_break().expect("ctrl_break handler");
+        let mut cc = ctrl_close().expect("ctrl_close handler");
+        let mut cs = ctrl_shutdown().expect("ctrl_shutdown handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => { tracing::info!("received Ctrl-C, shutting down"); }
+            _ = cb.recv() => { tracing::info!("received Ctrl-Break, shutting down"); }
+            _ = cc.recv() => { tracing::info!("received Ctrl-Close, shutting down"); }
+            _ = cs.recv() => { tracing::info!("received Ctrl-Shutdown, shutting down"); }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("shutting down");
+    }
+}
+
 async fn serve<S: MediaSource + 'static>(
     opts: ServeOpts,
     source: S,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _mdns: Option<Advertisement> = if opts.no_mdns {
+    let mut mdns: Option<Advertisement> = if opts.no_mdns {
         None
     } else {
-        Some(Advertisement::start(&opts.name, opts.bind.port())?)
+        let adv = Advertisement::start(&opts.name, opts.bind.port())?;
+        register_teardown(adv.teardown_handle());
+        Some(adv)
     };
 
     let config = Config {
@@ -303,11 +375,19 @@ async fn serve<S: MediaSource + 'static>(
     };
     let server = Server::new(config, source);
 
-    tokio::select! {
-        res = server.run() => { res?; }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutting down");
-        }
+    let result = tokio::select! {
+        res = server.run() => res,
+        () = wait_for_shutdown() => Ok(()),
+    };
+
+    // Always attempt a clean goodbye before propagating any error.
+    clear_teardown();
+    if let Some(adv) = mdns.take()
+        && let Err(e) = adv.stop().await
+    {
+        tracing::warn!("mDNS goodbye failed: {e}");
     }
+
+    result?;
     Ok(())
 }

@@ -82,7 +82,7 @@ pub fn encode(info: &ServerInfo<'_>) -> BytesMut {
         // Sharon-jones custom capabilities. Absent from stock DAAP; iRunes
         // and other cooperating clients look for `shrf` to gate features
         // before sending non-standard params like `query=` on items.
-        u32_field(b, tags::sharon_features(), tags::SHRF_QUERY);
+        u32_field(b, tags::sharon_features(), tags::SHRF_QUERY | tags::SHRF_SORT);
     });
     out
 }
@@ -227,6 +227,7 @@ mod tests {
         let body = encode(&info);
         let bits = read_u32(&body, b"shrf");
         assert_eq!(bits & tags::SHRF_QUERY, tags::SHRF_QUERY);
+        assert_eq!(bits & tags::SHRF_SORT, tags::SHRF_SORT);
     }
 
     #[test]

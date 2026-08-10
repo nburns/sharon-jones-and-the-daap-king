@@ -144,7 +144,7 @@ pub fn classic_aiff_byte_to_time_ms(byte_offset: u64) -> u32 {
 /// Emit the 54-byte AIFF header prelude for `sample_count` PCM8 mono
 /// samples at 22254 Hz. Big-endian throughout (AIFF native).
 pub fn classic_aiff_header(sample_count: u32) -> [u8; 54] {
-    let data_bytes = sample_count as u32; // 1 byte per sample, mono
+    let data_bytes = sample_count; // 1 byte per sample, mono
     let ssnd_chunk_size = 8u32 + data_bytes; // offset+blockSize (8) + audio
     let form_size = 4u32 // "AIFF"
         + 8 + 18      // COMM header + payload
@@ -539,11 +539,11 @@ fn ffmpeg_args(served: ServedFormat, track: &Track, seek_time_ms: Option<u32>) -
 }
 
 fn push_metadata(args: &mut Vec<String>, key: &str, value: Option<&str>) {
-    if let Some(v) = value {
-        if !v.is_empty() {
-            args.push("-metadata".into());
-            args.push(format!("{}={}", key, v));
-        }
+    if let Some(v) = value
+        && !v.is_empty()
+    {
+        args.push("-metadata".into());
+        args.push(format!("{}={}", key, v));
     }
 }
 

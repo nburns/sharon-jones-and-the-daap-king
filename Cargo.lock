@@ -370,6 +370,7 @@ dependencies = [
  "hyper",
  "ib-romaji",
  "image",
+ "libc",
  "lru",
  "mdns-sd",
  "media-source",

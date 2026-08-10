@@ -13,6 +13,7 @@ pub struct Envelope<T> {
 pub struct Body<T> {
     pub status: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub version: String,
     #[serde(rename = "type", default)]
     pub server_type: String,

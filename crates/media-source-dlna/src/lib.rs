@@ -493,10 +493,10 @@ fn find_control_url(description_xml: &str, service_type_substr: &str) -> Option<
         let end = start + end_rel;
         let block = &description_xml[start..end];
         let block_lower = &lower[start..end];
-        if block_lower.contains(&sub) {
-            if let Some(url) = extract_tag(block, "controlURL") {
-                return Some(url);
-            }
+        if block_lower.contains(&sub)
+            && let Some(url) = extract_tag(block, "controlURL")
+        {
+            return Some(url);
         }
         pos = end + "</service>".len();
     }

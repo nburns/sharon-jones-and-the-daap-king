@@ -223,9 +223,7 @@ pub fn encode_bitmap(width: u32, height: u32, bits: &[u8]) -> Result<Vec<u8>, Pi
     for y in 0..height as usize {
         let src_row = &bits[y * src_stride..(y + 1) * src_stride];
         out.extend_from_slice(src_row);
-        for _ in src_stride..row_bytes as usize {
-            out.push(0);
-        }
+        out.extend(std::iter::repeat_n(0u8, row_bytes as usize - src_stride));
     }
 
     align_even(&mut out);
@@ -326,7 +324,7 @@ fn align_even(out: &mut Vec<u8>) {
 
 fn pixmap_row_bytes(width: u32, pixel_size: u16) -> u16 {
     let bits = width as u64 * pixel_size as u64;
-    let bytes = ((bits + 15) / 16) * 2;
+    let bytes = bits.div_ceil(16) * 2;
     bytes as u16
 }
 
@@ -427,7 +425,7 @@ mod tests {
                     let count = 1 - n as isize;
                     let b = src[0];
                     src = &src[1..];
-                    out.extend(std::iter::repeat(b).take(count as usize));
+                    out.extend(std::iter::repeat_n(b, count as usize));
                 }
             }
             out
@@ -463,7 +461,7 @@ mod tests {
 
     #[test]
     fn encode_indexed_len_mismatch_errors() {
-        let e = encode_indexed(4, 4, &MAC_SYSTEM_PALETTE, &vec![0u8; 3]).unwrap_err();
+        let e = encode_indexed(4, 4, &MAC_SYSTEM_PALETTE, &[0u8; 3]).unwrap_err();
         assert!(matches!(e, PictError::LenMismatch { got: 3, expected: 16 }));
     }
 
@@ -540,7 +538,7 @@ mod tests {
 
     #[test]
     fn encode_packbits_invalid_pixel_size_errors() {
-        let e = encode_packbits(4, 4, 3, &MAC_4_COLOR, &vec![0u8; 16]).unwrap_err();
+        let e = encode_packbits(4, 4, 3, &MAC_4_COLOR, &[0u8; 16]).unwrap_err();
         assert!(matches!(e, PictError::InvalidPixelSize(3)));
     }
 

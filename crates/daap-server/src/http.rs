@@ -22,6 +22,7 @@ use crate::responses;
 use crate::search;
 use crate::server_info::{self, ClientDialect, ServerInfo};
 use crate::session::SessionStore;
+use crate::sort;
 use crate::transcode::{self, choose_format, client_supports_modern_codecs, ServedFormat, Transcoder};
 
 /// Cap on how much source audio we'll buffer into memory before feeding
@@ -236,9 +237,19 @@ async fn handle_items<S: MediaSource + 'static>(
 
     // Stable ordering across paged fetches of the same query. Source
     // order is stable per call but not necessarily identical between
-    // calls; pin it by track id so `index=0-199` + `index=200-399`
+    // calls; pin it either by an explicit `sort=` (sharon-jones
+    // extension) or by track id so `index=0-199` + `index=200-399`
     // concatenate without drift.
-    tracks.sort_by_key(|t| t.id);
+    match idx.sort.as_deref() {
+        Some(raw) => match sort::parse(raw) {
+            Ok(keys) => sort::apply(&mut tracks, &keys),
+            Err(err) => {
+                return (StatusCode::BAD_REQUEST, format!("bad sort: {err:?}"))
+                    .into_response_stub();
+            }
+        },
+        None => tracks.sort_by_key(|t| t.id),
+    }
 
     let total = tracks.len();
     let range = parse_index_range(idx.index.as_deref());
@@ -265,7 +276,7 @@ async fn handle_containers<S: MediaSource + 'static>(
     // "Artist - Album (YYYY)" name parses; otherwise (full_name, MAX,
     // full_name) so non-parseable names still cluster naturally against
     // parsed ones. Unknown year sorts last within an artist cluster.
-    extras.sort_by(|a, b| playlist_sort_key(&a.name).cmp(&playlist_sort_key(&b.name)));
+    extras.sort_by_key(|a| playlist_sort_key(&a.name));
 
     let total = 1 + extras.len();
     let range = parse_index_range(idx.index.as_deref());
@@ -328,10 +339,10 @@ fn parse_artist_album_year(name: &str) -> Option<(&str, &str, u16)> {
 /// - Range starting past the last playlist → empty page
 /// - Otherwise: Library included iff start == 0; extras trimmed so the
 ///   returned entries cover absolute indices [start, end_incl].
-fn slice_playlists<'a>(
+fn slice_playlists(
     range: Option<(usize, Option<usize>)>,
-    extras: &'a [media_source::Playlist],
-) -> (bool, &'a [media_source::Playlist]) {
+    extras: &[media_source::Playlist],
+) -> (bool, &[media_source::Playlist]) {
     let total = 1 + extras.len();
     match range {
         None => (true, extras),
@@ -386,20 +397,67 @@ async fn handle_container_items<S: MediaSource + 'static>(
     let offset = range.map(|(s, _)| s).unwrap_or(0);
 
     if full {
+        // `sort=` reorders the *whole* playlist before slicing so paged
+        // fetches with the same URL stay coherent. Malformed sort → 400
+        // exactly as on /items.
+        let sort_keys = match idx.sort.as_deref() {
+            Some(raw) => match sort::parse(raw) {
+                Ok(keys) => Some(keys),
+                Err(err) => {
+                    return (StatusCode::BAD_REQUEST, format!("bad sort: {err:?}"))
+                        .into_response_stub();
+                }
+            },
+            None => None,
+        };
         let by_id: std::collections::HashMap<u32, &media_source::Track> =
             tracks.iter().map(|t| (t.id, t)).collect();
-        let resolved: Vec<&media_source::Track> = sliced
-            .iter()
-            .filter_map(|id| {
-                let hit = by_id.get(id).copied();
-                if hit.is_none() {
-                    tracing::debug!(track_id = id, "playlist entry not in track list; skipping");
-                }
-                hit
-            })
-            .collect();
+        let (resolved, effective_offset): (Vec<&media_source::Track>, usize) = match sort_keys {
+            Some(keys) => {
+                let mut all: Vec<&media_source::Track> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        let hit = by_id.get(id).copied();
+                        if hit.is_none() {
+                            tracing::debug!(track_id = id, "playlist entry not in track list; skipping");
+                        }
+                        hit
+                    })
+                    .collect();
+                all.sort_by(|a, b| sort::compare(a, b, &keys));
+                let sorted_total = all.len();
+                let (start, end_incl) = match range {
+                    None => (0usize, sorted_total.saturating_sub(1)),
+                    Some((s, _)) if s >= sorted_total => (s, s.saturating_sub(1)),
+                    Some((s, e)) => {
+                        let last = sorted_total - 1;
+                        let ei = e.map(|v| v.min(last)).unwrap_or(last);
+                        (s, ei)
+                    }
+                };
+                let slice: Vec<&media_source::Track> = if start > end_incl {
+                    Vec::new()
+                } else {
+                    all[start..=end_incl].to_vec()
+                };
+                (slice, start)
+            }
+            None => {
+                let slice: Vec<&media_source::Track> = sliced
+                    .iter()
+                    .filter_map(|id| {
+                        let hit = by_id.get(id).copied();
+                        if hit.is_none() {
+                            tracing::debug!(track_id = id, "playlist entry not in track list; skipping");
+                        }
+                        hit
+                    })
+                    .collect();
+                (slice, offset)
+            }
+        };
         dmap_response_cs(
-            responses::playlist_songs_full(&resolved, total, offset, cs),
+            responses::playlist_songs_full(&resolved, total, effective_offset, cs),
             cs,
         )
     } else {
@@ -427,6 +485,10 @@ struct IndexQuery {
     /// Server-side search filter (sharon-jones extension, gated by the
     /// `shrf` capability bit in /server-info). See `search::parse`.
     query: Option<String>,
+    /// Server-side ordering (sharon-jones extension, gated by the
+    /// `SHRF_SORT` capability bit). Comma-separated keys with optional
+    /// `-` prefix for descending. See `sort::parse`.
+    sort: Option<String>,
 }
 
 /// True when the client's `meta=` value contains `all` (case-insensitive,
@@ -464,10 +526,10 @@ fn parse_index_range(raw: Option<&str>) -> Option<(usize, Option<usize>)> {
 
 /// Apply a parsed `index=` range to `all`, clamping to bounds. `end` = None
 /// means "to the last element."
-fn apply_index_range<'a, T>(
-    all: &'a [T],
+fn apply_index_range<T>(
+    all: &[T],
     range: Option<(usize, Option<usize>)>,
-) -> &'a [T] {
+) -> &[T] {
     match range {
         None => all,
         Some((start, _)) if start >= all.len() => &[],
@@ -486,17 +548,17 @@ async fn handle_artwork<S: MediaSource + 'static>(
     headers: HeaderMap,
 ) -> Response {
     // Validate mw/mh.
-    if let Some(mw) = q.mw {
-        if !(1..=1024).contains(&mw) {
-            tracing::error!(mw, "artwork request rejected: mw out of range 1..=1024");
-            return (StatusCode::BAD_REQUEST, "mw must be 1..=1024").into_response_stub();
-        }
+    if let Some(mw) = q.mw
+        && !(1..=1024).contains(&mw)
+    {
+        tracing::error!(mw, "artwork request rejected: mw out of range 1..=1024");
+        return (StatusCode::BAD_REQUEST, "mw must be 1..=1024").into_response_stub();
     }
-    if let Some(mh) = q.mh {
-        if !(1..=1024).contains(&mh) {
-            tracing::error!(mh, "artwork request rejected: mh out of range 1..=1024");
-            return (StatusCode::BAD_REQUEST, "mh must be 1..=1024").into_response_stub();
-        }
+    if let Some(mh) = q.mh
+        && !(1..=1024).contains(&mh)
+    {
+        tracing::error!(mh, "artwork request rejected: mh out of range 1..=1024");
+        return (StatusCode::BAD_REQUEST, "mh must be 1..=1024").into_response_stub();
     }
 
     // Determine variant: explicit depth/mode params override Accept header.
@@ -552,12 +614,12 @@ async fn handle_artwork<S: MediaSource + 'static>(
         OutputVariant::Pict { depth, mode }
     } else {
         // No explicit depth: check mode validity if mode is present.
-        if let Some(m) = q.mode.as_deref() {
-            if m != "gray" && m != "color" {
-                tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
-                return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
-                    .into_response_stub();
-            }
+        if let Some(m) = q.mode.as_deref()
+            && m != "gray" && m != "color"
+        {
+            tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
+            return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
+                .into_response_stub();
         }
         variant_from_accept(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()))
     };
@@ -698,10 +760,10 @@ async fn serve_passthrough<S: MediaSource + 'static>(
             *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
         }
         None => {
-            if let Some(len) = handle.total_bytes {
-                if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
-                    h.insert(header::CONTENT_LENGTH, v);
-                }
+            if let Some(len) = handle.total_bytes
+                && let Ok(v) = HeaderValue::from_str(&len.to_string())
+            {
+                h.insert(header::CONTENT_LENGTH, v);
             }
             *resp.status_mut() = StatusCode::OK;
         }
@@ -854,12 +916,11 @@ async fn serve_transcoded<S: MediaSource + 'static>(
         // MP3/ALAC omit it and rely on chunked transfer-encoding so a
         // small size-estimate drift can't leave hyper waiting for
         // bytes that will never come.
-        if matches!(served, ServedFormat::ClassicAiff) {
-            if let Some(total) = est_total {
-                if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
-                    h.insert(header::CONTENT_LENGTH, v);
-                }
-            }
+        if matches!(served, ServedFormat::ClassicAiff)
+            && let Some(total) = est_total
+            && let Ok(v) = HeaderValue::from_str(&total.to_string())
+        {
+            h.insert(header::CONTENT_LENGTH, v);
         }
         *resp.status_mut() = StatusCode::OK;
     }
@@ -1236,8 +1297,7 @@ mod tests {
     fn app_with_tracks_and_playlists(n: usize, extra_playlists: usize) -> Router {
         // Disable transcoding to keep track.format unchanged (test expectations
         // don't care about format munging).
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         router(Arc::new(HandlerState::new_with_transcode(
             "Big".into(),
             Arc::new(BigMemSource { n, extra_playlists }),
@@ -1344,6 +1404,239 @@ mod tests {
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 50);
         assert_eq!(find_field_u32(&body, b"mrco"), 50);
+    }
+
+    // ---- /databases/1/items ?sort= integration ----
+
+    /// Small source with hand-tuned metadata for sort testing. Titles,
+    /// artists, and years are picked so multi-key expectations are
+    /// unambiguous.
+    struct SortSource;
+
+    #[async_trait]
+    impl MediaSource for SortSource {
+        async fn databases(&self) -> MSResult<Vec<Database>> {
+            Ok(vec![Database { id: 1, name: "S".into() }])
+        }
+        async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
+            fn t(
+                id: u32,
+                title: &str,
+                artist: Option<&str>,
+                year: Option<u16>,
+                disc: Option<u16>,
+                track: Option<u16>,
+            ) -> Track {
+                Track {
+                    id,
+                    title: title.into(),
+                    artist: artist.map(str::to_string),
+                    album: None,
+                    album_artist: None,
+                    genre: None,
+                    track_number: track,
+                    disc_number: disc,
+                    year,
+                    duration_ms: None,
+                    bitrate_kbps: None,
+                    sample_rate: None,
+                    size_bytes: None,
+                    format: AudioFormat::Mp3,
+                }
+            }
+            Ok(vec![
+                t(10, "banana", Some("Wilco"), Some(2002), Some(1), Some(1)),
+                t(20, "Apple", Some("Beatles"), Some(1969), Some(1), Some(2)),
+                t(30, "cherry", Some("Beatles"), Some(1963), Some(2), Some(1)),
+                t(40, "date", Some("Beatles"), Some(1963), Some(1), Some(3)),
+                t(50, "elderberry", None, None, None, None),
+            ])
+        }
+        async fn playlists(&self, _db: DatabaseId) -> MSResult<Vec<Playlist>> {
+            Ok(vec![Playlist {
+                id: 2,
+                name: "P".into(),
+                track_ids: vec![10, 20, 30, 40, 50],
+            }])
+        }
+        async fn open_stream(&self, _: DatabaseId, _: TrackId) -> MSResult<StreamHandle> {
+            unimplemented!()
+        }
+        async fn artwork(&self, _: DatabaseId, _: TrackId) -> MSResult<Option<Bytes>> {
+            Ok(None)
+        }
+    }
+
+    fn app_sort() -> Router {
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        router(Arc::new(HandlerState::new_with_transcode(
+            "S".into(),
+            Arc::new(SortSource),
+            cfg,
+        )))
+    }
+
+    #[tokio::test]
+    async fn items_sort_by_title_case_insensitive() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=title")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_of(r).await;
+        // Apple(20) < banana(10) < cherry(30) < date(40) < elderberry(50)
+        assert_eq!(collect_miids(&body), vec![20, 10, 30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn items_sort_desc_year_missing_last() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=-year")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        // 2002(10), 1969(20), 1963(30,40 tie → id asc), then None(50) last.
+        assert_eq!(collect_miids(&body), vec![10, 20, 30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn items_sort_multi_key_artist_year_disc_track() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=artist,year,disc,track")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        // Beatles first: 1963 disc1 tr3 (40) < 1963 disc2 tr1 (30) < 1969 (20)
+        // Wilco: 2002 (10). Unknown artist (50) last.
+        assert_eq!(collect_miids(&body), vec![40, 30, 20, 10, 50]);
+    }
+
+    #[tokio::test]
+    async fn items_sort_reports_full_total_with_index() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=title&index=1-2")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        assert_eq!(find_field_u32(&body, b"mtco"), 5);
+        assert_eq!(find_field_u32(&body, b"mrco"), 2);
+        // title order = [20, 10, 30, 40, 50]; slice 1..=2 = [10, 30].
+        assert_eq!(collect_miids(&body), vec![10, 30]);
+    }
+
+    #[tokio::test]
+    async fn items_sort_paged_join_equals_full() {
+        // Same sort across two pages must concatenate identically to a
+        // single full-range fetch.
+        let full = {
+            let r = app_sort()
+                .oneshot(Request::builder()
+                    .uri("/databases/1/items?sort=-year")
+                    .body(Body::empty()).unwrap())
+                .await.unwrap();
+            collect_miids(&body_of(r).await)
+        };
+        let a = {
+            let r = app_sort()
+                .oneshot(Request::builder()
+                    .uri("/databases/1/items?sort=-year&index=0-2")
+                    .body(Body::empty()).unwrap())
+                .await.unwrap();
+            collect_miids(&body_of(r).await)
+        };
+        let b = {
+            let r = app_sort()
+                .oneshot(Request::builder()
+                    .uri("/databases/1/items?sort=-year&index=3-4")
+                    .body(Body::empty()).unwrap())
+                .await.unwrap();
+            collect_miids(&body_of(r).await)
+        };
+        assert_eq!(a.into_iter().chain(b).collect::<Vec<_>>(), full);
+    }
+
+    #[tokio::test]
+    async fn items_sort_unknown_field_is_400() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=composer")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn items_sort_malformed_is_400() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?sort=artist,")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn items_sort_combined_with_query_filter() {
+        // Filter to Beatles first, then sort remaining by track number desc.
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items?query=('daap.songartist:*beatles*')&sort=-track")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        assert_eq!(find_field_u32(&body, b"mtco"), 3);
+        // Beatles rows are ids 20(tr2), 30(tr1), 40(tr3). Desc by track: 40, 20, 30.
+        assert_eq!(collect_miids(&body), vec![40, 20, 30]);
+    }
+
+    #[tokio::test]
+    async fn container_items_meta_all_honours_sort() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers/2/items?meta=all&sort=title")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        let body = body_of(r).await;
+        assert_eq!(&body[0..4], b"apso");
+        assert_eq!(collect_miids(&body), vec![20, 10, 30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn container_items_ids_only_ignores_sort() {
+        // Ids-only path has no metadata to sort by; sort= is silently
+        // dropped, playlist order preserved.
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers/2/items?sort=title")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_of(r).await;
+        assert_eq!(collect_miids(&body), vec![10, 20, 30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn container_items_meta_all_bad_sort_is_400() {
+        let r = app_sort()
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers/2/items?meta=all&sort=composer")
+                    .body(Body::empty()).unwrap()
+            ).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
     // ---- /databases/1/containers/2/items ?index= integration ----
@@ -1519,8 +1812,7 @@ mod tests {
 
     #[tokio::test]
     async fn container_items_skips_missing_ids() {
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         let app = router(Arc::new(HandlerState::new_with_transcode(
             "Stale".into(),
             Arc::new(StaleIdSource),
@@ -1622,8 +1914,7 @@ mod tests {
     }
 
     fn app_with_playlist_names(names: Vec<String>) -> Router {
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         router(Arc::new(HandlerState::new_with_transcode(
             "N".into(),
             Arc::new(NamedPlaylistsSource { names }),
@@ -1947,8 +2238,7 @@ mod tests {
 
     fn range_app() -> Router {
         // Disable transcoding so MP3 stays as passthrough.
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         let state = Arc::new(HandlerState::new_with_transcode(
             "R".into(),
             Arc::new(RangeSource { contents: (b'A'..=b'Z').cycle().take(100).collect() }),
@@ -2058,8 +2348,7 @@ mod tests {
     }
 
     fn search_app(tracks: Vec<Track>) -> Router {
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         router(Arc::new(HandlerState::new_with_transcode(
             "S".into(),
             Arc::new(SearchSource { tracks }),
@@ -2248,8 +2537,7 @@ mod tests {
     }
 
     fn artwork_app(art: Option<Bytes>) -> Router {
-        let mut cfg = crate::transcode::Config::default();
-        cfg.enabled = false;
+        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
         router(Arc::new(HandlerState::new_with_transcode(
             "A".into(),
             Arc::new(ArtworkSource { art }),
