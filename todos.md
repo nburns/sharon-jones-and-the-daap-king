@@ -34,3 +34,4 @@ Order isn't priority — just a backlog. Each is an implementation of the
 - [ ] **Startup ffmpeg check** — verify `ffmpeg -version` runs at boot and warn if missing (instead of failing at first transcode).
 - [ ] **VBR MP3 transcode option** — currently CBR only because it keeps byte↔time math exact for Range/seek. VBR + Xing TOC is doable but needs cache-first-play for accurate seek.
 - [ ] **Content-codes coverage** — we only declare the ~50 tags we actually emit. iTunes tolerates missing entries but some clients (Rhythmbox, older forked-daapd) may barf on unknown tags in extended metadata. Consider dumping the full owntone `dmap_fields.gperf` if compat issues arise.
+- other compression schemes
