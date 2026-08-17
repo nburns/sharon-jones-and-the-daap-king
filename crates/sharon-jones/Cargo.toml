@@ -1,5 +1,5 @@
 [package]
-name = "citunes-cli"
+name = "sharon-jones"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true

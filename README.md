@@ -1,4 +1,4 @@
-# sharon-jones-and-the-daap-king
+# Sharon Jones and the DAAP King
 
 Serve a music library over DAAP so classic iTunes clients (iTunes 4.x on
 System 7 through modern iTunes) can browse and stream it over the LAN.
@@ -18,13 +18,13 @@ them into the DAAP server:
 
 ```
 # Filesystem
-cargo run -p citunes-cli --release -- --hostname music-box fs --music ~/Music
+cargo run -p sharon-jones --release -- --hostname music-box fs --music ~/Music
 
 # DLNA — auto-discover a UPnP MediaServer on the LAN
-cargo run -p citunes-cli --release -- --hostname music-box dlna
+cargo run -p sharon-jones --release -- --hostname music-box dlna
 
 # Subsonic
-SUBSONIC_API_KEY=... cargo run -p citunes-cli --release -- \
+SUBSONIC_API_KEY=... cargo run -p sharon-jones --release -- \
   --hostname music-box subsonic -u http://navidrome.local:4533
 ```
 
@@ -86,7 +86,7 @@ On Plex under Music, good choices are:
 1. List the servers on your LAN and note the ContentDirectory URL:
 
    ```
-   cargo run -p citunes-cli --release -- dlna-list
+   cargo run -p sharon-jones --release -- dlna-list
    ```
 
 2. Browse from the root (`ObjectID=0`) with a raw SOAP `Browse` and
@@ -120,7 +120,7 @@ On Plex under Music, good choices are:
    server with `--root <that-id>`.
 
 3. If you change `--root`, delete the on-disk cache (default
-   `/tmp/citunes-dlna-cache/`) or pass `--no-cache` — the cache is
+   `/tmp/sharon-jones-dlna-cache/`) or pass `--no-cache` — the cache is
    keyed per (server URL, root) so a fresh id triggers a rebrowse
    automatically, but stale entries can accumulate.
 

@@ -12,7 +12,7 @@ use crate::auth::{Credentials, auth_params};
 use crate::model;
 
 const API_VERSION: &str = "1.16.1";
-const CLIENT_ID: &str = "citunes";
+const CLIENT_ID: &str = "sharon-jones";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SubsonicError {

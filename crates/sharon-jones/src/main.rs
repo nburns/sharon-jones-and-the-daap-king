@@ -45,13 +45,13 @@ fn run_emergency_stop() {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "citunes",
+    name = "sharon-jones",
     about = "Serve a music library over DAAP for old iTunes clients"
 )]
 struct Args {
     /// Library name advertised over mDNS. Shown under Shared in iTunes.
     /// Free-form: spaces and punctuation are fine.
-    #[arg(short, long, default_value = "Classic iTunes Streamer")]
+    #[arg(short, long, default_value = "Sharon Jones and the DAAP King")]
     name: String,
 
     /// Hostname to publish this server under, without the `.local.` suffix
@@ -157,7 +157,7 @@ enum SourceKind {
         /// the cached catalogue is loaded instantly instead of re-browsing.
         /// Cache files are named per (server URL, root) so different targets
         /// don't collide.
-        #[arg(long, default_value = "/tmp/citunes-dlna-cache")]
+        #[arg(long, default_value = "/tmp/sharon-jones-dlna-cache")]
         cache_dir: PathBuf,
 
         /// Disable the on-disk catalogue cache; always browse fresh.
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn default_name_is_accepted_alongside_an_explicit_hostname() {
         let args = Args::try_parse_from([
-            "citunes",
+            "sharon-jones",
             "--hostname",
             "music-box",
             "fs",
@@ -444,21 +444,21 @@ mod tests {
             "/tmp",
         ])
         .expect("default name with an explicit hostname should parse");
-        assert_eq!(args.name, "Classic iTunes Streamer");
+        assert_eq!(args.name, "Sharon Jones and the DAAP King");
         assert_eq!(args.hostname.as_deref(), Some("music-box"));
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn hostname_is_required_when_advertising() {
-        Args::try_parse_from(["citunes", "fs", "--music", "/tmp"])
+        Args::try_parse_from(["sharon-jones", "fs", "--music", "/tmp"])
             .expect_err("advertising without --hostname should be rejected at parse time");
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn hostname_is_not_required_without_mdns() {
-        let args = Args::try_parse_from(["citunes", "--no-mdns", "fs", "--music", "/tmp"])
+        let args = Args::try_parse_from(["sharon-jones", "--no-mdns", "fs", "--music", "/tmp"])
             .expect("--no-mdns should not require a hostname");
         assert!(args.hostname.is_none());
     }

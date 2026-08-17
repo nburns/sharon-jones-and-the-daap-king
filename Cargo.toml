@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/media-source",
     "crates/daap-server",
-    "crates/media-source-dlna", "crates/media-source-fs", "crates/citunes-cli", "crates/media-source-subsonic", "crates/pict",
+    "crates/media-source-dlna", "crates/media-source-fs", "crates/sharon-jones", "crates/media-source-subsonic", "crates/pict",
 ]
 
 [workspace.package]
