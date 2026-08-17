@@ -166,7 +166,9 @@ impl Drop for Advertisement {
         // Only fires if stop() was not called - this is the best-effort fallback.
         if fullname.is_some() {
             tracing::warn!("Advertisement dropped without stop() - goodbye may not flush");
-            let _ = fullname.as_deref().and_then(|n| self.daemon.unregister(n).ok());
+            let _ = fullname
+                .as_deref()
+                .and_then(|n| self.daemon.unregister(n).ok());
             let _ = self.daemon.shutdown();
         }
     }

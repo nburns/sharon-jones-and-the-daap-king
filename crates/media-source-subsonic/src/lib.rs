@@ -201,7 +201,11 @@ pub(crate) fn parse_content_range(header: Option<&str>) -> (Option<(u64, u64)>, 
     let range = range_part
         .split_once('-')
         .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
-    let total = if total_part == "*" { None } else { total_part.parse().ok() };
+    let total = if total_part == "*" {
+        None
+    } else {
+        total_part.parse().ok()
+    };
     (range, total)
 }
 

@@ -166,7 +166,11 @@ fn read_metadata(path: &Path) -> Option<Meta> {
     let duration_ms = {
         let d = props.duration();
         let ms = d.as_millis();
-        if ms > 0 { Some(ms.min(u32::MAX as u128) as u32) } else { None }
+        if ms > 0 {
+            Some(ms.min(u32::MAX as u128) as u32)
+        } else {
+            None
+        }
     };
     let bitrate_kbps = props.audio_bitrate();
     let sample_rate = props.sample_rate();
@@ -308,13 +312,20 @@ fn read_embedded_artwork(path: &Path) -> Option<Bytes> {
 async fn read_folder_artwork(audio_path: &Path) -> Option<Bytes> {
     let dir = audio_path.parent()?;
     const CANDIDATES: &[&str] = &[
-        "cover.jpg", "Cover.jpg", "cover.jpeg",
-        "cover.png", "Cover.png",
-        "folder.jpg", "Folder.jpg",
+        "cover.jpg",
+        "Cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "Cover.png",
+        "folder.jpg",
+        "Folder.jpg",
         "folder.png",
-        "AlbumArt.jpg", "AlbumArtSmall.jpg",
-        "album.jpg", "Album.jpg",
-        "front.jpg", "Front.jpg",
+        "AlbumArt.jpg",
+        "AlbumArtSmall.jpg",
+        "album.jpg",
+        "Album.jpg",
+        "front.jpg",
+        "Front.jpg",
     ];
     for name in CANDIDATES {
         let p = dir.join(name);

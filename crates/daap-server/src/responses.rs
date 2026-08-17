@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use media_source::{AudioFormat, Database, Playlist, Track};
 
 use crate::charset::Charset;
-use crate::dmap::{container, string_field_bytes, u16_field, u32_field, u64_field, u8_field};
+use crate::dmap::{container, string_field_bytes, u8_field, u16_field, u32_field, u64_field};
 use crate::tags;
 
 /// Write a string field, encoding the value into the wire charset.
@@ -261,7 +261,13 @@ mod tests {
     use super::*;
 
     fn expect_tag_at(body: &[u8], offset: usize, tag: &[u8; 4]) {
-        assert_eq!(&body[offset..offset + 4], tag, "expected tag {:?} at offset {}", std::str::from_utf8(tag).unwrap(), offset);
+        assert_eq!(
+            &body[offset..offset + 4],
+            tag,
+            "expected tag {:?} at offset {}",
+            std::str::from_utf8(tag).unwrap(),
+            offset
+        );
     }
 
     fn container_body_len(body: &[u8]) -> usize {
@@ -287,7 +293,10 @@ mod tests {
 
     #[test]
     fn databases_lists_one_db() {
-        let dbs = vec![Database { id: 1, name: "Main".into() }];
+        let dbs = vec![Database {
+            id: 1,
+            name: "Main".into(),
+        }];
         let body = databases(&dbs, 10, 3, Charset::Utf8);
         expect_tag_at(&body, 0, b"avdb");
         assert_eq!(container_body_len(&body), body.len() - 8);
@@ -323,10 +332,16 @@ mod tests {
             id: 1,
             title: "Café".into(),
             artist: Some("Björk".into()),
-            album: None, album_artist: None,
-            genre: None, track_number: None, disc_number: None,
-            year: None, duration_ms: None, bitrate_kbps: None,
-            sample_rate: None, size_bytes: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            track_number: None,
+            disc_number: None,
+            year: None,
+            duration_ms: None,
+            bitrate_kbps: None,
+            sample_rate: None,
+            size_bytes: None,
             format: AudioFormat::Mp3,
         }];
         let body = items(&tracks, tracks.len(), Charset::MacRoman);
@@ -347,8 +362,16 @@ mod tests {
     #[test]
     fn playlists_slice_omits_library_when_range_starts_past_zero() {
         let extras = vec![
-            Playlist { id: 2, name: "Alpha".into(), track_ids: vec![] },
-            Playlist { id: 3, name: "Beta".into(),  track_ids: vec![] },
+            Playlist {
+                id: 2,
+                name: "Alpha".into(),
+                track_ids: vec![],
+            },
+            Playlist {
+                id: 3,
+                name: "Beta".into(),
+                track_ids: vec![],
+            },
         ];
         // Page = extras[0..2] with Library excluded; full total = 1 + 2 = 3.
         let body = playlists(1, 42, &extras, false, 3, Charset::Utf8);
@@ -358,8 +381,14 @@ mod tests {
         // mrco should be 2, mtco should be 3.
         let mrco_pos = find_field(&body, b"mrco");
         let mtco_pos = find_field(&body, b"mtco");
-        assert_eq!(u32::from_be_bytes(body[mrco_pos..mrco_pos + 4].try_into().unwrap()), 2);
-        assert_eq!(u32::from_be_bytes(body[mtco_pos..mtco_pos + 4].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_be_bytes(body[mrco_pos..mrco_pos + 4].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            u32::from_be_bytes(body[mtco_pos..mtco_pos + 4].try_into().unwrap()),
+            3
+        );
     }
 
     fn dummy_track(id: u32, title: &str) -> Track {
@@ -406,8 +435,14 @@ mod tests {
         let body = playlist_songs_full(&refs, 100, 42, Charset::Utf8);
         let mtco_offset = find_field(&body, b"mtco");
         let mrco_offset = find_field(&body, b"mrco");
-        assert_eq!(u32::from_be_bytes(body[mtco_offset..mtco_offset + 4].try_into().unwrap()), 100);
-        assert_eq!(u32::from_be_bytes(body[mrco_offset..mrco_offset + 4].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_be_bytes(body[mtco_offset..mtco_offset + 4].try_into().unwrap()),
+            100
+        );
+        assert_eq!(
+            u32::from_be_bytes(body[mrco_offset..mrco_offset + 4].try_into().unwrap()),
+            3
+        );
         let mpco_positions: Vec<u32> = body
             .windows(4)
             .enumerate()
@@ -434,8 +469,14 @@ mod tests {
         let body = playlist_songs_full(&refs, 5, 0, Charset::Utf8);
         let mtco_offset = find_field(&body, b"mtco");
         let mrco_offset = find_field(&body, b"mrco");
-        assert_eq!(u32::from_be_bytes(body[mtco_offset..mtco_offset + 4].try_into().unwrap()), 5);
-        assert_eq!(u32::from_be_bytes(body[mrco_offset..mrco_offset + 4].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_be_bytes(body[mtco_offset..mtco_offset + 4].try_into().unwrap()),
+            5
+        );
+        assert_eq!(
+            u32::from_be_bytes(body[mrco_offset..mrco_offset + 4].try_into().unwrap()),
+            3
+        );
     }
 
     fn find_field(body: &[u8], tag: &[u8; 4]) -> usize {

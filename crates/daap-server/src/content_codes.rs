@@ -15,18 +15,18 @@ use crate::tags;
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmapType {
-    Byte = 1,       // uint8
-    UByte = 2,      // int8
-    Short = 3,      // int16
-    UShort = 4,     // uint16
-    Int = 5,        // int32
-    UInt = 6,       // uint32
-    Long = 7,       // int64
-    ULong = 8,      // uint64
+    Byte = 1,   // uint8
+    UByte = 2,  // int8
+    Short = 3,  // int16
+    UShort = 4, // uint16
+    Int = 5,    // int32
+    UInt = 6,   // uint32
+    Long = 7,   // int64
+    ULong = 8,  // uint64
     String = 9,
     Date = 10,
-    Version = 11,   // packed major.minor int
-    List = 12,      // container of nested DMAP fields
+    Version = 11, // packed major.minor int
+    List = 12,    // container of nested DMAP fields
 }
 
 use DmapType::*;
@@ -51,7 +51,11 @@ fn field_table() -> &'static [FieldEntry] {
         (tags::supports_autologout, "dmap.supportsautologout", Byte),
         (tags::auth_method, "dmap.authenticationmethod", Byte),
         (tags::supports_update, "dmap.supportsupdate", Byte),
-        (tags::supports_persistent_ids, "dmap.supportspersistentids", Byte),
+        (
+            tags::supports_persistent_ids,
+            "dmap.supportspersistentids",
+            Byte,
+        ),
         (tags::supports_extensions, "dmap.supportsextensions", Byte),
         (tags::supports_browse, "dmap.supportsbrowse", Byte),
         (tags::supports_query, "dmap.supportsquery", Byte),
@@ -64,7 +68,6 @@ fn field_table() -> &'static [FieldEntry] {
         (tags::total_matched, "dmap.specifiedtotalcount", Int),
         (tags::returned_count, "dmap.returnedcount", Int),
         (tags::protocol_version, "dmap.protocolversion", Version),
-
         // Containers
         (tags::server_info_response, "dmap.serverinforesponse", List),
         (tags::login_response, "dmap.loginresponse", List),
@@ -75,7 +78,6 @@ fn field_table() -> &'static [FieldEntry] {
         (tags::playlist_songs_response, "daap.playlistsongs", List),
         (tags::listing, "dmap.listing", List),
         (tags::listing_item, "dmap.listingitem", List),
-
         // daap.*
         (tags::daap_protocol_version, "daap.protocolversion", Version),
         (tags::supports_extradata, "daap.supportsextradata", Short),
@@ -100,11 +102,21 @@ fn field_table() -> &'static [FieldEntry] {
     ]
 }
 
-fn mccr_container() -> crate::dmap::Tag { tag("mccr") } // content-codes response
-fn mdcl_container() -> crate::dmap::Tag { tag("mdcl") } // dictionary entry
-fn mcnm_field() -> crate::dmap::Tag { tag("mcnm") }     // 4-char tag name
-fn mcna_field() -> crate::dmap::Tag { tag("mcna") }     // long name
-fn mcty_field() -> crate::dmap::Tag { tag("mcty") }     // type code
+fn mccr_container() -> crate::dmap::Tag {
+    tag("mccr")
+} // content-codes response
+fn mdcl_container() -> crate::dmap::Tag {
+    tag("mdcl")
+} // dictionary entry
+fn mcnm_field() -> crate::dmap::Tag {
+    tag("mcnm")
+} // 4-char tag name
+fn mcna_field() -> crate::dmap::Tag {
+    tag("mcna")
+} // long name
+fn mcty_field() -> crate::dmap::Tag {
+    tag("mcty")
+} // type code
 
 pub fn encode() -> BytesMut {
     let table = field_table();
@@ -149,7 +161,9 @@ mod tests {
     #[test]
     fn declares_all_common_tags() {
         let body = encode();
-        for expected in [b"minm", b"mstt", b"miid", b"asal", b"asar", b"asfm", b"mlit", b"mlcl"] {
+        for expected in [
+            b"minm", b"mstt", b"miid", b"asal", b"asar", b"asfm", b"mlit", b"mlcl",
+        ] {
             assert!(
                 body.windows(4).any(|w| w == expected),
                 "missing tag {}",
@@ -172,7 +186,9 @@ mod tests {
             {
                 // Skip mcnm header+value (8+4), skip mcna header (8) + its value (variable).
                 let mcna_off = i + 8 + 4;
-                let mcna_len = u32::from_be_bytes(body[mcna_off + 4..mcna_off + 8].try_into().unwrap()) as usize;
+                let mcna_len =
+                    u32::from_be_bytes(body[mcna_off + 4..mcna_off + 8].try_into().unwrap())
+                        as usize;
                 let mcty_off = mcna_off + 8 + mcna_len;
                 assert_eq!(&body[mcty_off..mcty_off + 4], b"mcty");
                 let ty = u16::from_be_bytes(body[mcty_off + 8..mcty_off + 10].try_into().unwrap());

@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 use bytes::BytesMut;
 use media_source::{DatabaseId, MediaSource, TrackId};
 use serde::Deserialize;
@@ -15,7 +15,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::artwork::{self, Artworker, OutputVariant, PictDepth, PictMode, Prepared};
 use crate::buffered_body::BufferedBody;
-use crate::charset::{charset_from_accept, Charset};
+use crate::charset::{Charset, charset_from_accept};
 use crate::content_codes;
 use crate::prefix_reader::PrefixReader;
 use crate::responses;
@@ -23,7 +23,9 @@ use crate::search;
 use crate::server_info::{self, ClientDialect, ServerInfo};
 use crate::session::SessionStore;
 use crate::sort;
-use crate::transcode::{self, choose_format, client_supports_modern_codecs, ServedFormat, Transcoder};
+use crate::transcode::{
+    self, ServedFormat, Transcoder, choose_format, client_supports_modern_codecs,
+};
 
 /// Cap on how much source audio we'll buffer into memory before feeding
 /// ffmpeg. Larger than any realistic single track (256 MiB is roughly
@@ -180,16 +182,33 @@ async fn handle_databases<S: MediaSource + 'static>(
     State(state): State<Arc<HandlerState<S>>>,
     headers: HeaderMap,
 ) -> Response {
-    let cs = charset_from_accept(headers.get(header::ACCEPT_CHARSET).and_then(|v| v.to_str().ok()));
+    let cs = charset_from_accept(
+        headers
+            .get(header::ACCEPT_CHARSET)
+            .and_then(|v| v.to_str().ok()),
+    );
     let dbs = state.source.databases().await.unwrap_or_default();
     let (track_count, playlist_count) = if let Some(db) = dbs.first() {
-        let t = state.source.tracks(db.id).await.map(|v| v.len() as u32).unwrap_or(0);
-        let p = state.source.playlists(db.id).await.map(|v| v.len() as u32 + 1).unwrap_or(1);
+        let t = state
+            .source
+            .tracks(db.id)
+            .await
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        let p = state
+            .source
+            .playlists(db.id)
+            .await
+            .map(|v| v.len() as u32 + 1)
+            .unwrap_or(1);
         (t, p)
     } else {
         (0, 0)
     };
-    dmap_response_cs(responses::databases(&dbs, track_count, playlist_count, cs), cs)
+    dmap_response_cs(
+        responses::databases(&dbs, track_count, playlist_count, cs),
+        cs,
+    )
 }
 
 async fn handle_items<S: MediaSource + 'static>(
@@ -199,8 +218,14 @@ async fn handle_items<S: MediaSource + 'static>(
     headers: HeaderMap,
 ) -> Response {
     let mut tracks = state.source.tracks(db).await.unwrap_or_default();
-    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok());
-    let cs = charset_from_accept(headers.get(header::ACCEPT_CHARSET).and_then(|v| v.to_str().ok()));
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    let cs = charset_from_accept(
+        headers
+            .get(header::ACCEPT_CHARSET)
+            .and_then(|v| v.to_str().ok()),
+    );
     let cfg = state.transcoder.config().clone();
     if cfg.enabled {
         let modern = client_supports_modern_codecs(ua);
@@ -263,7 +288,11 @@ async fn handle_containers<S: MediaSource + 'static>(
     Query(idx): Query<IndexQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let cs = charset_from_accept(headers.get(header::ACCEPT_CHARSET).and_then(|v| v.to_str().ok()));
+    let cs = charset_from_accept(
+        headers
+            .get(header::ACCEPT_CHARSET)
+            .and_then(|v| v.to_str().ok()),
+    );
     let tracks = state.source.tracks(db).await.unwrap_or_default();
     let mut extras = state.source.playlists(db).await.unwrap_or_default();
     // Stable case-insensitive order. The paginated 68k source pane fetches
@@ -366,7 +395,11 @@ async fn handle_container_items<S: MediaSource + 'static>(
     Query(idx): Query<IndexQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let cs = charset_from_accept(headers.get(header::ACCEPT_CHARSET).and_then(|v| v.to_str().ok()));
+    let cs = charset_from_accept(
+        headers
+            .get(header::ACCEPT_CHARSET)
+            .and_then(|v| v.to_str().ok()),
+    );
     let full = wants_full_metadata(idx.meta.as_deref());
     // Full-metadata path needs the track table for lookup; ids-only path
     // only needs it for the synthetic Library case, so we conditionally
@@ -419,7 +452,10 @@ async fn handle_container_items<S: MediaSource + 'static>(
                     .filter_map(|id| {
                         let hit = by_id.get(id).copied();
                         if hit.is_none() {
-                            tracing::debug!(track_id = id, "playlist entry not in track list; skipping");
+                            tracing::debug!(
+                                track_id = id,
+                                "playlist entry not in track list; skipping"
+                            );
                         }
                         hit
                     })
@@ -448,7 +484,10 @@ async fn handle_container_items<S: MediaSource + 'static>(
                     .filter_map(|id| {
                         let hit = by_id.get(id).copied();
                         if hit.is_none() {
-                            tracing::debug!(track_id = id, "playlist entry not in track list; skipping");
+                            tracing::debug!(
+                                track_id = id,
+                                "playlist entry not in track list; skipping"
+                            );
                         }
                         hit
                     })
@@ -526,10 +565,7 @@ fn parse_index_range(raw: Option<&str>) -> Option<(usize, Option<usize>)> {
 
 /// Apply a parsed `index=` range to `all`, clamping to bounds. `end` = None
 /// means "to the last element."
-fn apply_index_range<T>(
-    all: &[T],
-    range: Option<(usize, Option<usize>)>,
-) -> &[T] {
+fn apply_index_range<T>(all: &[T], range: Option<(usize, Option<usize>)>) -> &[T] {
     match range {
         None => all,
         Some((start, _)) if start >= all.len() => &[],
@@ -582,31 +618,42 @@ async fn handle_artwork<S: MediaSource + 'static>(
             // depth=1 or depth=24: mode must be absent.
             (PictDepth::D1 | PictDepth::D24, None) => None,
             (PictDepth::D1, Some(m)) => {
-                tracing::error!(mode = m, "artwork request rejected: mode must be absent when depth=1");
+                tracing::error!(
+                    mode = m,
+                    "artwork request rejected: mode must be absent when depth=1"
+                );
                 return (StatusCode::BAD_REQUEST, "mode must be absent when depth=1")
                     .into_response_stub();
             }
             (PictDepth::D24, Some(m)) => {
-                tracing::error!(mode = m, "artwork request rejected: mode must be absent when depth=24");
+                tracing::error!(
+                    mode = m,
+                    "artwork request rejected: mode must be absent when depth=24"
+                );
                 return (StatusCode::BAD_REQUEST, "mode must be absent when depth=24")
                     .into_response_stub();
             }
             // depth=2/4/8: mode must be present and valid.
-            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("gray")) => {
-                Some(PictMode::Gray)
-            }
-            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("color")) => {
-                Some(PictMode::Color)
-            }
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("gray")) => Some(PictMode::Gray),
+            (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some("color")) => Some(PictMode::Color),
             (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, Some(m)) => {
-                tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
+                tracing::error!(
+                    mode = m,
+                    "artwork request rejected: invalid mode (must be 'gray' or 'color')"
+                );
                 return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
                     .into_response_stub();
             }
             (PictDepth::D2 | PictDepth::D4 | PictDepth::D8, None) => {
                 // Absent mode for non-1/24 depths: also invalid per strict rules.
-                tracing::error!(depth = raw_depth, "artwork request rejected: mode must be present when depth is 2, 4, or 8");
-                return (StatusCode::BAD_REQUEST, "mode must be present when depth is 2, 4, or 8")
+                tracing::error!(
+                    depth = raw_depth,
+                    "artwork request rejected: mode must be present when depth is 2, 4, or 8"
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "mode must be present when depth is 2, 4, or 8",
+                )
                     .into_response_stub();
             }
         };
@@ -615,9 +662,13 @@ async fn handle_artwork<S: MediaSource + 'static>(
     } else {
         // No explicit depth: check mode validity if mode is present.
         if let Some(m) = q.mode.as_deref()
-            && m != "gray" && m != "color"
+            && m != "gray"
+            && m != "color"
         {
-            tracing::error!(mode = m, "artwork request rejected: invalid mode (must be 'gray' or 'color')");
+            tracing::error!(
+                mode = m,
+                "artwork request rejected: invalid mode (must be 'gray' or 'color')"
+            );
             return (StatusCode::BAD_REQUEST, "mode must be 'gray' or 'color'")
                 .into_response_stub();
         }
@@ -628,8 +679,14 @@ async fn handle_artwork<S: MediaSource + 'static>(
         Ok(Some(raw)) => {
             let prepared = state.artworker.prepare(track_id, raw, q.mw, q.mh, variant);
             let (bytes, content_type): (bytes::Bytes, &'static str) = match prepared {
-                Prepared::Encoded { bytes, content_type } => (bytes, content_type),
-                Prepared::Original { bytes, content_type } => (bytes, content_type),
+                Prepared::Encoded {
+                    bytes,
+                    content_type,
+                } => (bytes, content_type),
+                Prepared::Original {
+                    bytes,
+                    content_type,
+                } => (bytes, content_type),
             };
             let mut resp = Response::new(Body::from(bytes));
             let h = resp.headers_mut();
@@ -660,9 +717,15 @@ fn variant_from_accept(accept: Option<&str>) -> OutputVariant {
     };
     if a.contains("image/x-pict") {
         if a.contains("depth=1") {
-            return OutputVariant::Pict { depth: PictDepth::D1, mode: None };
+            return OutputVariant::Pict {
+                depth: PictDepth::D1,
+                mode: None,
+            };
         }
-        return OutputVariant::Pict { depth: PictDepth::D8, mode: Some(PictMode::Color) };
+        return OutputVariant::Pict {
+            depth: PictDepth::D8,
+            mode: Some(PictMode::Color),
+        };
     }
     OutputVariant::Jpeg
 }
@@ -678,14 +741,20 @@ async fn handle_stream<S: MediaSource + 'static>(
         None => return (StatusCode::BAD_REQUEST, "invalid track id").into_response_stub(),
     };
 
-    let track = match state.source.tracks(db).await.ok().and_then(|ts| {
-        ts.into_iter().find(|t| t.id == track_id)
-    }) {
+    let track = match state
+        .source
+        .tracks(db)
+        .await
+        .ok()
+        .and_then(|ts| ts.into_iter().find(|t| t.id == track_id))
+    {
         Some(t) => t,
         None => return (StatusCode::NOT_FOUND, "not found").into_response_stub(),
     };
 
-    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok());
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let cfg = state.transcoder.config().clone();
 
@@ -694,11 +763,7 @@ async fn handle_stream<S: MediaSource + 'static>(
     let served = if let Some(f) = format_from_accept(accept) {
         f
     } else if cfg.enabled {
-        choose_format(
-            track.format,
-            client_supports_modern_codecs(ua),
-            cfg.preset,
-        )
+        choose_format(track.format, client_supports_modern_codecs(ua), cfg.preset)
     } else {
         ServedFormat::Passthrough(track.format)
     };
@@ -730,7 +795,12 @@ async fn serve_passthrough<S: MediaSource + 'static>(
     range: Option<(u64, Option<u64>)>,
 ) -> Response {
     let handle_result = match range {
-        Some((start, end)) => state.source.open_stream_range(db, track_id, start, end).await,
+        Some((start, end)) => {
+            state
+                .source
+                .open_stream_range(db, track_id, start, end)
+                .await
+        }
         None => state.source.open_stream(db, track_id).await,
     };
     let handle = match handle_result {
@@ -740,7 +810,10 @@ async fn serve_passthrough<S: MediaSource + 'static>(
 
     let mut resp = Response::new(Body::from_stream(ReaderStream::new(handle.body)));
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(handle.content_type));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(handle.content_type),
+    );
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     match handle.range {
@@ -794,7 +867,12 @@ async fn serve_transcoded<S: MediaSource + 'static>(
             return (StatusCode::BAD_GATEWAY, "source read failed").into_response_stub();
         }
         Err(BufferSourceError::TooLarge(n)) => {
-            tracing::error!(track_id, size = n, cap = SOURCE_BUFFER_CAP, "source exceeds buffer cap");
+            tracing::error!(
+                track_id,
+                size = n,
+                cap = SOURCE_BUFFER_CAP,
+                "source exceeds buffer cap"
+            );
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "source track exceeds server buffer cap",
@@ -808,21 +886,20 @@ async fn serve_transcoded<S: MediaSource + 'static>(
     // duration is second-accurate; ffprobe on the actual source bytes
     // is sample-accurate. If probing fails, fall back to the metadata
     // duration (worse but still bounded — no silence).
-    let classic_aiff_sample_count: Option<u32> =
-        if matches!(served, ServedFormat::ClassicAiff) {
-            match state
-                .transcoder
-                .probe_duration_micros_bytes(&source_bytes)
-                .await
-            {
-                Ok(Some(micros)) => Some(transcode::classic_aiff_sample_count_micros(micros)),
-                Ok(None) | Err(_) => track.duration_ms.map(|d| {
-                    (d as u64 * transcode::CLASSIC_AIFF_SAMPLE_RATE as u64 / 1000) as u32
-                }),
-            }
-        } else {
-            None
-        };
+    let classic_aiff_sample_count: Option<u32> = if matches!(served, ServedFormat::ClassicAiff) {
+        match state
+            .transcoder
+            .probe_duration_micros_bytes(&source_bytes)
+            .await
+        {
+            Ok(Some(micros)) => Some(transcode::classic_aiff_sample_count_micros(micros)),
+            Ok(None) | Err(_) => track
+                .duration_ms
+                .map(|d| (d as u64 * transcode::CLASSIC_AIFF_SAMPLE_RATE as u64 / 1000) as u32),
+        }
+    } else {
+        None
+    };
 
     // Total transcoded byte count when we can compute it.
     //   ClassicAiff: exact — 54-byte AIFF header + sample_count bytes of PCM.
@@ -978,7 +1055,9 @@ struct BytesReader {
     pos: usize,
 }
 impl BytesReader {
-    fn new(data: bytes::Bytes) -> Self { Self { data, pos: 0 } }
+    fn new(data: bytes::Bytes) -> Self {
+        Self { data, pos: 0 }
+    }
 }
 impl tokio::io::AsyncRead for BytesReader {
     fn poll_read(
@@ -1032,7 +1111,11 @@ fn dmap_response_cs(body: BytesMut, cs: Charset) -> Response {
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(
         "DAAP-Server",
-        HeaderValue::from_static(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"))),
+        HeaderValue::from_static(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        )),
     );
     *resp.status_mut() = StatusCode::OK;
     resp
@@ -1068,7 +1151,10 @@ mod tests {
     #[async_trait]
     impl MediaSource for MemSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "Test".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "Test".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok(vec![Track {
@@ -1107,13 +1193,21 @@ mod tests {
     }
 
     async fn body_of(response: Response) -> Vec<u8> {
-        to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
     }
 
     #[tokio::test]
     async fn server_info_returns_dmap_response() {
         let r = app()
-            .oneshot(Request::builder().uri("/server-info").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/server-info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
@@ -1126,7 +1220,12 @@ mod tests {
         let app = app();
         let r = app
             .clone()
-            .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
@@ -1137,7 +1236,12 @@ mod tests {
     #[tokio::test]
     async fn update_returns_current_revision() {
         let r = app()
-            .oneshot(Request::builder().uri("/update?revision-number=1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/update?revision-number=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
@@ -1148,7 +1252,12 @@ mod tests {
     #[tokio::test]
     async fn databases_lists_our_db() {
         let r = app()
-            .oneshot(Request::builder().uri("/databases").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/databases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = body_of(r).await;
@@ -1159,7 +1268,12 @@ mod tests {
     #[tokio::test]
     async fn items_includes_track_metadata() {
         let r = app()
-            .oneshot(Request::builder().uri("/databases/1/items").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = body_of(r).await;
@@ -1170,7 +1284,12 @@ mod tests {
     #[tokio::test]
     async fn containers_includes_library_playlist() {
         let r = app()
-            .oneshot(Request::builder().uri("/databases/1/containers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/databases/1/containers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = body_of(r).await;
@@ -1230,9 +1349,12 @@ mod tests {
         let all: Vec<u32> = (0..100).collect();
         assert_eq!(apply_index_range(&all, None), &all[..]);
         assert_eq!(apply_index_range(&all, Some((10, Some(19)))), &all[10..=19]);
-        assert_eq!(apply_index_range(&all, Some((90, Some(999)))), &all[90..=99]); // clamp end
-        assert_eq!(apply_index_range(&all, Some((42, None))), &all[42..=99]);      // open end
-        assert!(apply_index_range(&all, Some((200, Some(300)))).is_empty());       // out of range
+        assert_eq!(
+            apply_index_range(&all, Some((90, Some(999)))),
+            &all[90..=99]
+        ); // clamp end
+        assert_eq!(apply_index_range(&all, Some((42, None))), &all[42..=99]); // open end
+        assert!(apply_index_range(&all, Some((200, Some(300)))).is_empty()); // out of range
     }
 
     // ---- /databases/1/items ?index= integration ----
@@ -1246,17 +1368,27 @@ mod tests {
     #[async_trait]
     impl MediaSource for BigMemSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "Big".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "Big".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok((0..self.n)
                 .map(|i| Track {
                     id: (i + 1) as TrackId,
                     title: format!("t{i}"),
-                    artist: None, album: None, album_artist: None,
-                    genre: None, track_number: None, disc_number: None,
-                    year: None, duration_ms: None, bitrate_kbps: None,
-                    sample_rate: None, size_bytes: None,
+                    artist: None,
+                    album: None,
+                    album_artist: None,
+                    genre: None,
+                    track_number: None,
+                    disc_number: None,
+                    year: None,
+                    duration_ms: None,
+                    bitrate_kbps: None,
+                    sample_rate: None,
+                    size_bytes: None,
                     format: AudioFormat::Mp3,
                 })
                 .collect())
@@ -1297,7 +1429,10 @@ mod tests {
     fn app_with_tracks_and_playlists(n: usize, extra_playlists: usize) -> Router {
         // Disable transcoding to keep track.format unchanged (test expectations
         // don't care about format munging).
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         router(Arc::new(HandlerState::new_with_transcode(
             "Big".into(),
             Arc::new(BigMemSource { n, extra_playlists }),
@@ -1331,8 +1466,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?index=100-149")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 1000);
@@ -1346,8 +1484,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?index=100-200")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 50);
         assert_eq!(find_field_u32(&body, b"mrco"), 0);
@@ -1360,8 +1501,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?index=40-999")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mrco"), 10); // 40..=49
     }
@@ -1372,8 +1516,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?index=45-")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 50);
         assert_eq!(find_field_u32(&body, b"mrco"), 5); // 45..=49
@@ -1385,8 +1532,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 50);
         assert_eq!(find_field_u32(&body, b"mrco"), 50);
@@ -1398,8 +1548,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?index=garbage")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 50);
@@ -1416,7 +1569,10 @@ mod tests {
     #[async_trait]
     impl MediaSource for SortSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "S".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "S".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             fn t(
@@ -1468,7 +1624,10 @@ mod tests {
     }
 
     fn app_sort() -> Router {
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         router(Arc::new(HandlerState::new_with_transcode(
             "S".into(),
             Arc::new(SortSource),
@@ -1482,8 +1641,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=title")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         // Apple(20) < banana(10) < cherry(30) < date(40) < elderberry(50)
@@ -1496,8 +1658,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=-year")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         // 2002(10), 1969(20), 1963(30,40 tie → id asc), then None(50) last.
         assert_eq!(collect_miids(&body), vec![10, 20, 30, 40, 50]);
@@ -1509,8 +1674,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=artist,year,disc,track")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         // Beatles first: 1963 disc1 tr3 (40) < 1963 disc2 tr1 (30) < 1969 (20)
         // Wilco: 2002 (10). Unknown artist (50) last.
@@ -1523,8 +1691,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=title&index=1-2")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 5);
         assert_eq!(find_field_u32(&body, b"mrco"), 2);
@@ -1538,26 +1709,38 @@ mod tests {
         // single full-range fetch.
         let full = {
             let r = app_sort()
-                .oneshot(Request::builder()
-                    .uri("/databases/1/items?sort=-year")
-                    .body(Body::empty()).unwrap())
-                .await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .uri("/databases/1/items?sort=-year")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_miids(&body_of(r).await)
         };
         let a = {
             let r = app_sort()
-                .oneshot(Request::builder()
-                    .uri("/databases/1/items?sort=-year&index=0-2")
-                    .body(Body::empty()).unwrap())
-                .await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .uri("/databases/1/items?sort=-year&index=0-2")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_miids(&body_of(r).await)
         };
         let b = {
             let r = app_sort()
-                .oneshot(Request::builder()
-                    .uri("/databases/1/items?sort=-year&index=3-4")
-                    .body(Body::empty()).unwrap())
-                .await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .uri("/databases/1/items?sort=-year&index=3-4")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_miids(&body_of(r).await)
         };
         assert_eq!(a.into_iter().chain(b).collect::<Vec<_>>(), full);
@@ -1569,8 +1752,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=composer")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1580,8 +1766,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?sort=artist,")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1592,8 +1781,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/items?query=('daap.songartist:*beatles*')&sort=-track")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 3);
         // Beatles rows are ids 20(tr2), 30(tr1), 40(tr3). Desc by track: 40, 20, 30.
@@ -1606,8 +1798,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?meta=all&sort=title")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"apso");
         assert_eq!(collect_miids(&body), vec![20, 10, 30, 40, 50]);
@@ -1621,8 +1816,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?sort=title")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(collect_miids(&body), vec![10, 20, 30, 40, 50]);
@@ -1634,8 +1832,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?meta=all&sort=composer")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1647,8 +1848,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?index=5-14")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"apso");
         assert_eq!(find_field_u32(&body, b"mtco"), 30);
@@ -1664,8 +1868,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?index=5-9")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         // Extract all mpco values in order
         let mut mpcos = Vec::new();
@@ -1685,8 +1892,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?index=100-200")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 30);
         assert_eq!(find_field_u32(&body, b"mrco"), 0);
@@ -1698,8 +1908,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 30);
         assert_eq!(find_field_u32(&body, b"mrco"), 30);
@@ -1714,14 +1927,23 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?index=0-2&meta=all")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"apso");
         // Metadata tags that only appear with full-encoding, not the
         // old ids-only shape.
-        assert!(body.windows(4).any(|w| w == b"minm"), "expected item_name field");
-        assert!(body.windows(4).any(|w| w == b"asfm"), "expected song_format field");
+        assert!(
+            body.windows(4).any(|w| w == b"minm"),
+            "expected item_name field"
+        );
+        assert!(
+            body.windows(4).any(|w| w == b"asfm"),
+            "expected song_format field"
+        );
         assert!(body.windows(2).any(|w| w == b"t0"));
         assert!(body.windows(4).any(|w| w == b"mpco"));
     }
@@ -1734,15 +1956,27 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?index=0-2")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"apso");
         assert!(body.windows(4).any(|w| w == b"miid"));
         assert!(body.windows(4).any(|w| w == b"mpco"));
-        assert!(!body.windows(4).any(|w| w == b"minm"), "ids-only shape must not carry minm");
-        assert!(!body.windows(4).any(|w| w == b"asfm"), "ids-only shape must not carry asfm");
-        assert!(!body.windows(4).any(|w| w == b"asar"), "ids-only shape must not carry asar");
+        assert!(
+            !body.windows(4).any(|w| w == b"minm"),
+            "ids-only shape must not carry minm"
+        );
+        assert!(
+            !body.windows(4).any(|w| w == b"asfm"),
+            "ids-only shape must not carry asfm"
+        );
+        assert!(
+            !body.windows(4).any(|w| w == b"asar"),
+            "ids-only shape must not carry asar"
+        );
     }
 
     #[tokio::test]
@@ -1764,7 +1998,9 @@ mod tests {
     fn wants_full_metadata_gate() {
         assert!(!wants_full_metadata(None));
         assert!(!wants_full_metadata(Some("")));
-        assert!(!wants_full_metadata(Some("dmap.itemid,dmap.containeritemid")));
+        assert!(!wants_full_metadata(Some(
+            "dmap.itemid,dmap.containeritemid"
+        )));
         assert!(wants_full_metadata(Some("all")));
         assert!(wants_full_metadata(Some("ALL")));
         assert!(wants_full_metadata(Some("dmap.itemid,all")));
@@ -1780,17 +2016,28 @@ mod tests {
     #[async_trait]
     impl MediaSource for StaleIdSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "Stale".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "Stale".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             // Real tracks: ids 1, 2, 3 only.
             Ok((1..=3)
                 .map(|i| Track {
-                    id: i, title: format!("t{i}"),
-                    artist: None, album: None, album_artist: None,
-                    genre: None, track_number: None, disc_number: None,
-                    year: None, duration_ms: None, bitrate_kbps: None,
-                    sample_rate: None, size_bytes: None,
+                    id: i,
+                    title: format!("t{i}"),
+                    artist: None,
+                    album: None,
+                    album_artist: None,
+                    genre: None,
+                    track_number: None,
+                    disc_number: None,
+                    year: None,
+                    duration_ms: None,
+                    bitrate_kbps: None,
+                    sample_rate: None,
+                    size_bytes: None,
                     format: AudioFormat::Mp3,
                 })
                 .collect())
@@ -1798,7 +2045,8 @@ mod tests {
         async fn playlists(&self, _db: DatabaseId) -> MSResult<Vec<Playlist>> {
             // Playlist references ids 1..=5 but only 1,2,3 exist.
             Ok(vec![Playlist {
-                id: 2, name: "Mixed".into(),
+                id: 2,
+                name: "Mixed".into(),
                 track_ids: vec![1, 2, 3, 4, 5],
             }])
         }
@@ -1812,7 +2060,10 @@ mod tests {
 
     #[tokio::test]
     async fn container_items_skips_missing_ids() {
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         let app = router(Arc::new(HandlerState::new_with_transcode(
             "Stale".into(),
             Arc::new(StaleIdSource),
@@ -1822,8 +2073,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers/2/items?meta=all")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         // Full-metadata path resolves ids against the track table and drops
         // stale entries. mtco reflects the ORIGINAL playlist size (5),
@@ -1838,7 +2092,11 @@ mod tests {
     #[test]
     fn slice_playlists_covers_all_shapes() {
         let extras: Vec<Playlist> = (0..20)
-            .map(|i| Playlist { id: (i + 2) as u32, name: format!("p{i}"), track_ids: vec![] })
+            .map(|i| Playlist {
+                id: (i + 2) as u32,
+                name: format!("p{i}"),
+                track_ids: vec![],
+            })
             .collect();
 
         // No range → include Library, full extras.
@@ -1888,7 +2146,10 @@ mod tests {
     #[async_trait]
     impl MediaSource for NamedPlaylistsSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "N".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "N".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok(vec![])
@@ -1914,7 +2175,10 @@ mod tests {
     }
 
     fn app_with_playlist_names(names: Vec<String>) -> Router {
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         router(Arc::new(HandlerState::new_with_transcode(
             "N".into(),
             Arc::new(NamedPlaylistsSource { names }),
@@ -1987,8 +2251,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         let out = collect_minm_values(&body);
         assert_eq!(
@@ -2016,8 +2283,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         let out = collect_minm_values(&body);
         assert_eq!(
@@ -2045,8 +2315,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         let out = collect_minm_values(&body);
         assert_eq!(
@@ -2066,8 +2339,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         let names = collect_minm_values(&body);
         // Library first (synthetic, abs 0), then alpha extras.
@@ -2093,8 +2369,11 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .uri("/databases/1/containers?index=0-29")
-                        .body(Body::empty()).unwrap()
-                ).await.unwrap();
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_minm_values(&body_of(r).await)
         };
         let page_a = {
@@ -2102,8 +2381,11 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .uri("/databases/1/containers?index=0-14")
-                        .body(Body::empty()).unwrap()
-                ).await.unwrap();
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_minm_values(&body_of(r).await)
         };
         let page_b = {
@@ -2111,8 +2393,11 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .uri("/databases/1/containers?index=15-29")
-                        .body(Body::empty()).unwrap()
-                ).await.unwrap();
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             collect_minm_values(&body_of(r).await)
         };
         let joined: Vec<String> = page_a.into_iter().chain(page_b).collect();
@@ -2128,8 +2413,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers?index=5-9")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"aply");
@@ -2146,8 +2434,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers?index=0-0")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 21);
         assert_eq!(find_field_u32(&body, b"mrco"), 1);
@@ -2163,8 +2454,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers?index=15-")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 21);
         // abs 15..=20 = 6 entries.
@@ -2177,8 +2471,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers?index=100-200")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 21);
         assert_eq!(find_field_u32(&body, b"mrco"), 0);
@@ -2190,8 +2487,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/databases/1/containers")
-                    .body(Body::empty()).unwrap()
-            ).await.unwrap();
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 21);
         assert_eq!(find_field_u32(&body, b"mrco"), 21);
@@ -2208,16 +2508,25 @@ mod tests {
     #[async_trait]
     impl MediaSource for RangeSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "R".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "R".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok(vec![Track {
                 id: 42,
                 title: "T".into(),
-                artist: None, album: None, album_artist: None,
-                genre: None, track_number: None, disc_number: None,
-                year: None, duration_ms: Some(10_000),
-                bitrate_kbps: Some(192), sample_rate: None,
+                artist: None,
+                album: None,
+                album_artist: None,
+                genre: None,
+                track_number: None,
+                disc_number: None,
+                year: None,
+                duration_ms: Some(10_000),
+                bitrate_kbps: Some(192),
+                sample_rate: None,
                 size_bytes: Some(self.contents.len() as u64),
                 format: AudioFormat::Mp3,
             }])
@@ -2226,8 +2535,13 @@ mod tests {
             Ok(vec![])
         }
         async fn open_stream(&self, _: DatabaseId, _: TrackId) -> MSResult<StreamHandle> {
-            let body: media_source::ByteStream = Box::pin(std::io::Cursor::new(self.contents.clone()));
-            Ok(StreamHandle::full("audio/mpeg", Some(self.contents.len() as u64), body))
+            let body: media_source::ByteStream =
+                Box::pin(std::io::Cursor::new(self.contents.clone()));
+            Ok(StreamHandle::full(
+                "audio/mpeg",
+                Some(self.contents.len() as u64),
+                body,
+            ))
         }
         // Default open_stream_range implementation is fine for this test — it
         // exercises the default trait method's skip-based fallback.
@@ -2238,10 +2552,15 @@ mod tests {
 
     fn range_app() -> Router {
         // Disable transcoding so MP3 stays as passthrough.
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         let state = Arc::new(HandlerState::new_with_transcode(
             "R".into(),
-            Arc::new(RangeSource { contents: (b'A'..=b'Z').cycle().take(100).collect() }),
+            Arc::new(RangeSource {
+                contents: (b'A'..=b'Z').cycle().take(100).collect(),
+            }),
             cfg,
         ));
         router(state)
@@ -2260,7 +2579,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(r.headers().get(header::CONTENT_RANGE).unwrap(), "bytes 10-19/100");
+        assert_eq!(
+            r.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 10-19/100"
+        );
         assert_eq!(r.headers().get(header::CONTENT_LENGTH).unwrap(), "10");
         assert_eq!(r.headers().get(header::ACCEPT_RANGES).unwrap(), "bytes");
         let body = body_of(r).await;
@@ -2298,7 +2620,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(r.headers().get(header::CONTENT_RANGE).unwrap(), "bytes 90-99/100");
+        assert_eq!(
+            r.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 90-99/100"
+        );
         let body = body_of(r).await;
         assert_eq!(body.len(), 10);
     }
@@ -2312,7 +2637,10 @@ mod tests {
     #[async_trait]
     impl MediaSource for SearchSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "S".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "S".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok(self.tracks.clone())
@@ -2348,7 +2676,10 @@ mod tests {
     }
 
     fn search_app(tracks: Vec<Track>) -> Router {
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         router(Arc::new(HandlerState::new_with_transcode(
             "S".into(),
             Arc::new(SearchSource { tracks }),
@@ -2387,10 +2718,14 @@ mod tests {
         // axum's Query extractor URL-decodes automatically; encode the
         // whole value for realism.
         let encoded: String = url_encode(q);
-        let uri = format!("/databases/1/items?session-id=1&type=music&meta=all&index=0-199&query={}", encoded);
-        let r = search_app(tracks).oneshot(
-            Request::builder().uri(&uri).body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let uri = format!(
+            "/databases/1/items?session-id=1&type=music&meta=all&index=0-199&query={}",
+            encoded
+        );
+        let r = search_app(tracks)
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(find_field_u32(&body, b"mtco"), 3);
@@ -2409,9 +2744,10 @@ mod tests {
         for pat in ["*beatles*", "*Beatles*", "*BEATLES*"] {
             let q = format!("('daap.songartist:{}')", pat);
             let uri = format!("/databases/1/items?query={}", url_encode(&q));
-            let r = search_app(tracks.clone()).oneshot(
-                Request::builder().uri(&uri).body(Body::empty()).unwrap()
-            ).await.unwrap();
+            let r = search_app(tracks.clone())
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
             let body = body_of(r).await;
             assert_eq!(find_field_u32(&body, b"mtco"), 3, "pattern {pat}");
         }
@@ -2423,9 +2759,10 @@ mod tests {
         let tracks = vec![mk_track(1, "T", "A", "B")];
         let q = "('dmap.itemname:*nothingmatches*')";
         let uri = format!("/databases/1/items?query={}", url_encode(q));
-        let r = search_app(tracks).oneshot(
-            Request::builder().uri(&uri).body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let r = search_app(tracks)
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_of(r).await;
         assert_eq!(&body[0..4], b"adbs");
@@ -2439,9 +2776,10 @@ mod tests {
         let tracks = vec![mk_track(1, "T", "A", "B")];
         // Missing outer parens.
         let uri = "/databases/1/items?query=daap.songartist:*x*";
-        let r = search_app(tracks).oneshot(
-            Request::builder().uri(uri).body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let r = search_app(tracks)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2455,21 +2793,48 @@ mod tests {
         let q = "('dmap.itemname:*song*')";
         let base = format!("/databases/1/items?query={}", url_encode(q));
 
-        let full = collect_miids(&body_of(
-            search_app(tracks.clone()).oneshot(
-                Request::builder().uri(format!("{base}&index=0-29")).body(Body::empty()).unwrap()
-            ).await.unwrap()
-        ).await);
-        let page_a = collect_miids(&body_of(
-            search_app(tracks.clone()).oneshot(
-                Request::builder().uri(format!("{base}&index=0-14")).body(Body::empty()).unwrap()
-            ).await.unwrap()
-        ).await);
-        let page_b = collect_miids(&body_of(
-            search_app(tracks).oneshot(
-                Request::builder().uri(format!("{base}&index=15-29")).body(Body::empty()).unwrap()
-            ).await.unwrap()
-        ).await);
+        let full = collect_miids(
+            &body_of(
+                search_app(tracks.clone())
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("{base}&index=0-29"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        let page_a = collect_miids(
+            &body_of(
+                search_app(tracks.clone())
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("{base}&index=0-14"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        let page_b = collect_miids(
+            &body_of(
+                search_app(tracks)
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("{base}&index=15-29"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
         let joined: Vec<u32> = page_a.into_iter().chain(page_b).collect();
         assert_eq!(joined, full);
         assert_eq!(joined.len(), 30);
@@ -2511,16 +2876,25 @@ mod tests {
     #[async_trait]
     impl MediaSource for ArtworkSource {
         async fn databases(&self) -> MSResult<Vec<Database>> {
-            Ok(vec![Database { id: 1, name: "A".into() }])
+            Ok(vec![Database {
+                id: 1,
+                name: "A".into(),
+            }])
         }
         async fn tracks(&self, _db: DatabaseId) -> MSResult<Vec<Track>> {
             Ok(vec![Track {
                 id: 1,
                 title: "T".into(),
-                artist: None, album: None, album_artist: None,
-                genre: None, track_number: None, disc_number: None,
-                year: None, duration_ms: Some(1000),
-                bitrate_kbps: Some(128), sample_rate: None,
+                artist: None,
+                album: None,
+                album_artist: None,
+                genre: None,
+                track_number: None,
+                disc_number: None,
+                year: None,
+                duration_ms: Some(1000),
+                bitrate_kbps: Some(128),
+                sample_rate: None,
                 size_bytes: Some(1234),
                 format: AudioFormat::Mp3,
             }])
@@ -2537,7 +2911,10 @@ mod tests {
     }
 
     fn artwork_app(art: Option<Bytes>) -> Router {
-        let cfg = crate::transcode::Config { enabled: false, ..Default::default() };
+        let cfg = crate::transcode::Config {
+            enabled: false,
+            ..Default::default()
+        };
         router(Arc::new(HandlerState::new_with_transcode(
             "A".into(),
             Arc::new(ArtworkSource { art }),
@@ -2731,7 +3108,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(r.status(), StatusCode::OK, "combo {combo} should return 200");
+            assert_eq!(
+                r.status(),
+                StatusCode::OK,
+                "combo {combo} should return 200"
+            );
             assert_eq!(
                 r.headers().get(header::CONTENT_TYPE).unwrap(),
                 "image/x-pict",

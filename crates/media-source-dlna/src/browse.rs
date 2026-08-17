@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 
 use media_source::{AudioFormat, TrackId};
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use url::Url;
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -70,7 +70,9 @@ const PAGE_SIZE: u32 = 200;
 /// Container names we skip at depth 0 — these are non-audio media hierarchies
 /// exposed by servers like Plex, Jellyfin, Emby. Case-insensitive match on
 /// the container title. Empty title (root) always descends.
-const SKIP_TOP_LEVEL: &[&str] = &["Video", "Videos", "Photos", "Photo", "Movies", "TV Shows", "TV"];
+const SKIP_TOP_LEVEL: &[&str] = &[
+    "Video", "Videos", "Photos", "Photo", "Movies", "TV Shows", "TV",
+];
 
 pub async fn build_catalogue(
     control_url: &Url,
@@ -126,7 +128,11 @@ pub async fn build_catalogue(
         if depth > 0 && !container_track_ids.is_empty() {
             cat.containers.push(AudioContainer {
                 id: next_container_id,
-                name: if name.is_empty() { object_id.clone() } else { name.clone() },
+                name: if name.is_empty() {
+                    object_id.clone()
+                } else {
+                    name.clone()
+                },
                 track_ids: container_track_ids,
             });
             next_container_id += 1;
@@ -235,8 +241,8 @@ async fn browse_children(
 /// which is a nightmare to reassemble. Byte-level substring extraction is
 /// perfectly safe for these small SOAP envelopes.
 fn extract_browse_response(soap: &str) -> Result<(String, u32, u32), BrowseError> {
-    let didl_raw = slice_between(soap, "<Result>", "</Result>")
-        .ok_or(BrowseError::MissingResult)?;
+    let didl_raw =
+        slice_between(soap, "<Result>", "</Result>").ok_or(BrowseError::MissingResult)?;
     // CDATA-wrapped payloads (some servers) — strip the CDATA envelope.
     let didl_raw = didl_raw
         .strip_prefix("<![CDATA[")
@@ -403,16 +409,15 @@ fn parse_didl_lite(xml: &str, base_url: &Url) -> ParseDidlResult {
     Ok((containers, items))
 }
 
-fn handle_start(
-    e: &BytesStart<'_>,
-    node: &mut Node,
-    text_target: &mut Option<TextTarget>,
-) {
+fn handle_start(e: &BytesStart<'_>, node: &mut Node, text_target: &mut Option<TextTarget>) {
     let local = local_name(e.name().as_ref()).to_string();
     match local.as_str() {
         "container" => {
             let id = attr(e, b"id").unwrap_or_default();
-            *node = Node::Container { id, title: String::new() };
+            *node = Node::Container {
+                id,
+                title: String::new(),
+            };
         }
         "item" => {
             let b = Box::new(ItemBuilder {
@@ -439,8 +444,8 @@ fn handle_start(
             if let Node::Item(b) = node
                 && b.res.is_none()
             {
-                let mime = attr(e, b"protocolInfo")
-                    .and_then(|p| p.split(':').nth(2).map(str::to_string));
+                let mime =
+                    attr(e, b"protocolInfo").and_then(|p| p.split(':').nth(2).map(str::to_string));
                 let duration_ms = attr(e, b"duration").and_then(|s| parse_duration_ms(&s));
                 let bitrate_kbps = attr(e, b"bitrate")
                     .and_then(|s| s.parse::<u32>().ok())
@@ -557,7 +562,8 @@ fn resolve_entity(name: &str) -> Option<String> {
         "apos" => Some("'".to_string()),
         n if n.starts_with('#') => {
             let rest = &n[1..];
-            let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+            let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X'))
+            {
                 u32::from_str_radix(hex, 16).ok()?
             } else {
                 rest.parse::<u32>().ok()?
@@ -662,7 +668,9 @@ mod tests {
     fn resolve_url_handles_relative_and_absolute() {
         let base = Url::parse("http://server:1234/desc.xml").unwrap();
         assert_eq!(
-            resolve_url(&base, "http://other/stream.mp3").unwrap().as_str(),
+            resolve_url(&base, "http://other/stream.mp3")
+                .unwrap()
+                .as_str(),
             "http://other/stream.mp3"
         );
         assert_eq!(
@@ -703,7 +711,10 @@ mod tests {
         assert_eq!(it.sample_rate, Some(44100));
         assert_eq!(it.mime.as_deref(), Some("audio/mpeg"));
         assert_eq!(it.format, AudioFormat::Mp3);
-        assert_eq!(it.stream_url.as_str(), "http://server:8200/stream/song1.mp3");
+        assert_eq!(
+            it.stream_url.as_str(),
+            "http://server:8200/stream/song1.mp3"
+        );
     }
 
     #[test]
@@ -720,7 +731,10 @@ mod tests {
         let base = Url::parse("http://server:8200/description.xml").unwrap();
         let (containers, items) = parse_didl_lite(xml, &base).unwrap();
         assert_eq!(items.len(), 0);
-        assert_eq!(containers, vec![("albums".to_string(), "Albums".to_string())]);
+        assert_eq!(
+            containers,
+            vec![("albums".to_string(), "Albums".to_string())]
+        );
     }
 
     #[test]
@@ -775,7 +789,10 @@ mod tests {
         let (containers, items) = parse_didl_lite(xml, &base).unwrap();
         assert_eq!(
             containers,
-            vec![("c1".into(), "Toots & The Maytals - Reggae Got Soul (1976)".into())]
+            vec![(
+                "c1".into(),
+                "Toots & The Maytals - Reggae Got Soul (1976)".into()
+            )]
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Rock & Roll <live>");

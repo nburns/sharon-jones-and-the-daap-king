@@ -114,10 +114,8 @@ pub fn classic_aiff_size(duration_ms: u32) -> u32 {
 /// Rounded to nearest sample; PCM at 22254 Hz has one sample every
 /// ~44.9 microseconds, so this is exact to well below one sample.
 pub fn classic_aiff_sample_count_micros(duration_micros: u64) -> u32 {
-    let samples = (duration_micros
-        .saturating_mul(CLASSIC_AIFF_SAMPLE_RATE as u64)
-        + 500_000)
-        / 1_000_000;
+    let samples =
+        (duration_micros.saturating_mul(CLASSIC_AIFF_SAMPLE_RATE as u64) + 500_000) / 1_000_000;
     samples.min(u32::MAX as u64) as u32
 }
 
@@ -315,9 +313,10 @@ impl Transcoder {
         input: media_source::ByteStream,
         seek_time_ms: Option<u32>,
     ) -> std::io::Result<TranscodeHandle> {
-        let permit = Arc::clone(&self.slots).acquire_owned().await.map_err(|_| {
-            std::io::Error::other("transcoder shutting down")
-        })?;
+        let permit = Arc::clone(&self.slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| std::io::Error::other("transcoder shutting down"))?;
         let args = ffmpeg_args(served, track, seek_time_ms);
         let mut cmd = Command::new(&self.config.ffmpeg_path);
         cmd.args(&args)
@@ -367,9 +366,12 @@ impl Transcoder {
     pub async fn probe_duration_ms(&self, url_or_path: &str) -> std::io::Result<Option<u32>> {
         let output = Command::new(&self.config.ffprobe_path)
             .args([
-                "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 url_or_path,
             ])
             .stdin(Stdio::null())
@@ -395,16 +397,17 @@ impl Transcoder {
     /// microseconds. Feeds `bytes` to ffprobe on stdin. Used to compute
     /// a sample-accurate Content-Length for CBR outputs (ClassicAiff)
     /// where the metadata-derived duration is only accurate to seconds.
-    pub async fn probe_duration_micros_bytes(
-        &self,
-        bytes: &[u8],
-    ) -> std::io::Result<Option<u64>> {
+    pub async fn probe_duration_micros_bytes(&self, bytes: &[u8]) -> std::io::Result<Option<u64>> {
         let mut child = Command::new(&self.config.ffprobe_path)
             .args([
-                "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                "-i", "pipe:0",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                "-i",
+                "pipe:0",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -622,8 +625,10 @@ mod tests {
             choose_format(AudioFormat::Aac, false, p),
             ServedFormat::Mp3 { bitrate_kbps: 192 }
         );
-        assert_eq!(choose_format(AudioFormat::Alac, true, p),
-            ServedFormat::Passthrough(AudioFormat::Alac));
+        assert_eq!(
+            choose_format(AudioFormat::Alac, true, p),
+            ServedFormat::Passthrough(AudioFormat::Alac)
+        );
         assert_eq!(
             choose_format(AudioFormat::Alac, false, p),
             ServedFormat::Mp3 { bitrate_kbps: 192 }
@@ -671,7 +676,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_args_include_correct_encoder() {
-        let mp3 = ffmpeg_args(ServedFormat::Mp3 { bitrate_kbps: 192 }, &dummy_track(), None);
+        let mp3 = ffmpeg_args(
+            ServedFormat::Mp3 { bitrate_kbps: 192 },
+            &dummy_track(),
+            None,
+        );
         assert!(mp3.iter().any(|s| s == "libmp3lame"));
         assert!(mp3.iter().any(|s| s == "192k"));
         let alac = ffmpeg_args(ServedFormat::Alac, &dummy_track(), None);
@@ -681,7 +690,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_args_inject_track_metadata() {
-        let args = ffmpeg_args(ServedFormat::Mp3 { bitrate_kbps: 192 }, &dummy_track(), None);
+        let args = ffmpeg_args(
+            ServedFormat::Mp3 { bitrate_kbps: 192 },
+            &dummy_track(),
+            None,
+        );
         // Metadata pairs come through as `-metadata key=value` — verify a
         // handful of them show up.
         assert!(args.iter().any(|s| s == "title=Hello"));
@@ -697,7 +710,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_args_include_id3v2_options_for_mp3() {
-        let args = ffmpeg_args(ServedFormat::Mp3 { bitrate_kbps: 128 }, &dummy_track(), None);
+        let args = ffmpeg_args(
+            ServedFormat::Mp3 { bitrate_kbps: 128 },
+            &dummy_track(),
+            None,
+        );
         assert!(args.iter().any(|s| s == "-id3v2_version"));
         assert!(args.iter().any(|s| s == "-write_id3v1"));
     }
@@ -719,7 +736,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_args_no_seek_when_time_is_none() {
-        let args = ffmpeg_args(ServedFormat::Mp3 { bitrate_kbps: 192 }, &dummy_track(), None);
+        let args = ffmpeg_args(
+            ServedFormat::Mp3 { bitrate_kbps: 192 },
+            &dummy_track(),
+            None,
+        );
         assert!(!args.iter().any(|s| s == "-ss"));
     }
 

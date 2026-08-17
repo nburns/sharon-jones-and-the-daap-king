@@ -6,12 +6,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use daap_server::mdns::{Advertisement, TeardownHandle};
 use daap_server::artwork;
+use daap_server::mdns::{Advertisement, TeardownHandle};
 use daap_server::transcode::{self, Preset};
 use daap_server::{Config, Server};
 use media_source::MediaSource;
-use media_source_dlna::{cache_filename, CacheConfig, DlnaSource};
+use media_source_dlna::{CacheConfig, DlnaSource, cache_filename};
 use media_source_fs::FsSource;
 use media_source_subsonic::{Credentials, SubsonicSource};
 use url::Url;
@@ -44,7 +44,10 @@ fn run_emergency_stop() {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "citunes", about = "Serve a music library over DAAP for old iTunes clients")]
+#[command(
+    name = "citunes",
+    about = "Serve a music library over DAAP for old iTunes clients"
+)]
 struct Args {
     /// Library name advertised over mDNS. Shown under Shared in iTunes.
     /// Free-form: spaces and punctuation are fine.
@@ -292,10 +295,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             serve(make_opts(args.name.clone()), source).await
         }
-        SourceKind::Subsonic { url, api_key, user, password } => {
+        SourceKind::Subsonic {
+            url,
+            api_key,
+            user,
+            password,
+        } => {
             let creds = match (api_key, user, password) {
                 (Some(k), _, _) => Credentials::ApiKey(k),
-                (None, Some(u), Some(p)) => Credentials::UserPassword { user: u, password: p },
+                (None, Some(u), Some(p)) => Credentials::UserPassword {
+                    user: u,
+                    password: p,
+                },
                 (None, Some(_), None) => {
                     return Err("subsonic --user requires --password or SUBSONIC_PASSWORD".into());
                 }
@@ -424,9 +435,15 @@ mod tests {
     /// label - the shipped default contains spaces.
     #[test]
     fn default_name_is_accepted_alongside_an_explicit_hostname() {
-        let args =
-            Args::try_parse_from(["citunes", "--hostname", "music-box", "fs", "--music", "/tmp"])
-                .expect("default name with an explicit hostname should parse");
+        let args = Args::try_parse_from([
+            "citunes",
+            "--hostname",
+            "music-box",
+            "fs",
+            "--music",
+            "/tmp",
+        ])
+        .expect("default name with an explicit hostname should parse");
         assert_eq!(args.name, "Classic iTunes Streamer");
         assert_eq!(args.hostname.as_deref(), Some("music-box"));
     }

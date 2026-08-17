@@ -45,9 +45,15 @@ pub use portable::{Advertisement, StopError, TeardownHandle};
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn require_valid_hostname(name: &str) -> Result<(), InvalidHostname> {
     if name.is_empty() {
-        return Err(InvalidHostname { name: name.into(), reason: "empty" });
+        return Err(InvalidHostname {
+            name: name.into(),
+            reason: "empty",
+        });
     }
-    if let Some(bad) = name.chars().find(|c| !c.is_ascii_alphanumeric() && *c != '-') {
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '-')
+    {
         return Err(InvalidHostname {
             name: name.into(),
             reason: match bad {

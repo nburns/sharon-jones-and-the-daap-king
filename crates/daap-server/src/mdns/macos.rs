@@ -36,13 +36,15 @@ impl TeardownHandle {
         loop {
             // WNOHANG spin until the child exits or budget expires.
             let mut status: libc::c_int = 0;
-            let ret =
-                unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            let ret = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
             if ret > 0 {
                 break; // child exited
             }
             if deadline.elapsed() >= EMERGENCY_BUDGET {
-                tracing::warn!("dns-sd (pid={}) did not exit within emergency budget", self.pid);
+                tracing::warn!(
+                    "dns-sd (pid={}) did not exit within emergency budget",
+                    self.pid
+                );
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -101,7 +103,9 @@ impl Advertisement {
     }
 
     pub fn teardown_handle(&self) -> TeardownHandle {
-        TeardownHandle { pid: self.child.id() }
+        TeardownHandle {
+            pid: self.child.id(),
+        }
     }
 
     /// Sends SIGTERM to dns-sd and waits for it to exit (mDNSResponder then
@@ -121,9 +125,7 @@ impl Advertisement {
         match result {
             Ok(Ok(Ok(_status))) => Ok(()),
             Ok(Ok(Err(e))) => Err(StopError::Io(e)),
-            Ok(Err(join_err)) => {
-                Err(StopError::Io(io::Error::other(join_err.to_string())))
-            }
+            Ok(Err(join_err)) => Err(StopError::Io(io::Error::other(join_err.to_string()))),
             Err(_timeout) => {
                 // SIGKILL as last resort; the goodbye is lost.
                 unsafe {
@@ -138,9 +140,7 @@ impl Advertisement {
 impl Drop for Advertisement {
     fn drop(&mut self) {
         // Best-effort fallback - prefer stop().await for a clean goodbye.
-        tracing::warn!(
-            "Advertisement dropped without stop() - mDNSResponder may not send goodbye"
-        );
+        tracing::warn!("Advertisement dropped without stop() - mDNSResponder may not send goodbye");
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

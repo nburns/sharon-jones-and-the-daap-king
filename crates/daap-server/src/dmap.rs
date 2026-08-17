@@ -82,7 +82,9 @@ mod tests {
         string_field(&mut buf, tag("minm"), "Hello");
         assert_eq!(
             &buf[..],
-            &[b'm', b'i', b'n', b'm', 0, 0, 0, 5, b'H', b'e', b'l', b'l', b'o']
+            &[
+                b'm', b'i', b'n', b'm', 0, 0, 0, 5, b'H', b'e', b'l', b'l', b'o'
+            ]
         );
     }
 

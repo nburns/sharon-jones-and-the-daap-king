@@ -158,7 +158,8 @@ mod tests {
 
     #[test]
     fn parses_three_way_or() {
-        let raw = "('dmap.itemname:*beatles*','daap.songartist:*beatles*','daap.songalbum:*beatles*')";
+        let raw =
+            "('dmap.itemname:*beatles*','daap.songartist:*beatles*','daap.songalbum:*beatles*')";
         let q = parse(raw).unwrap();
         assert_eq!(q.clauses.len(), 3);
         assert_eq!(
@@ -188,24 +189,42 @@ mod tests {
 
     #[test]
     fn rejects_missing_outer_parens() {
-        assert_eq!(parse("'daap.songartist:*x*'"), Err(ParseError::MissingOuterParens));
+        assert_eq!(
+            parse("'daap.songartist:*x*'"),
+            Err(ParseError::MissingOuterParens)
+        );
     }
 
     #[test]
     fn rejects_unquoted_clause() {
-        assert_eq!(parse("(daap.songartist:*x*)"), Err(ParseError::UnquotedClause));
+        assert_eq!(
+            parse("(daap.songartist:*x*)"),
+            Err(ParseError::UnquotedClause)
+        );
     }
 
     #[test]
     fn rejects_missing_colon() {
-        assert_eq!(parse("('daap.songartist*x*')"), Err(ParseError::MissingColon));
+        assert_eq!(
+            parse("('daap.songartist*x*')"),
+            Err(ParseError::MissingColon)
+        );
     }
 
     #[test]
     fn rejects_pattern_without_wildcards() {
-        assert_eq!(parse("('daap.songartist:beatles')"), Err(ParseError::UnwrappedPattern));
-        assert_eq!(parse("('daap.songartist:*beatles')"), Err(ParseError::UnwrappedPattern));
-        assert_eq!(parse("('daap.songartist:beatles*')"), Err(ParseError::UnwrappedPattern));
+        assert_eq!(
+            parse("('daap.songartist:beatles')"),
+            Err(ParseError::UnwrappedPattern)
+        );
+        assert_eq!(
+            parse("('daap.songartist:*beatles')"),
+            Err(ParseError::UnwrappedPattern)
+        );
+        assert_eq!(
+            parse("('daap.songartist:beatles*')"),
+            Err(ParseError::UnwrappedPattern)
+        );
     }
 
     #[test]
@@ -219,7 +238,10 @@ mod tests {
         let q = parse("('dmap.itemname:*love*','daap.songartist:*love*','daap.songalbum:*love*')")
             .unwrap();
         // Title hit.
-        assert!(matches(&q, &track(1, "Love Song", Some("Nobody"), Some("Album X"))));
+        assert!(matches(
+            &q,
+            &track(1, "Love Song", Some("Nobody"), Some("Album X"))
+        ));
         // Artist hit.
         assert!(matches(&q, &track(2, "X", Some("Love Battery"), Some("Y"))));
         // Album hit.

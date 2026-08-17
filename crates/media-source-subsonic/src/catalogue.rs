@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use media_source::{AudioFormat, TrackId};
 use tokio::sync::Semaphore;
 
@@ -65,43 +65,33 @@ pub struct PlaylistEntry {
 
 pub async fn build(client: &Arc<Client>) -> std::result::Result<Catalogue, SubsonicError> {
     let artists = client.get_artists().await?;
-    let artist_count: usize = artists
-        .artists
-        .index
-        .iter()
-        .map(|i| i.artist.len())
-        .sum();
+    let artist_count: usize = artists.artists.index.iter().map(|i| i.artist.len()).sum();
     tracing::info!(artists = artist_count, "Subsonic: fetching artist detail");
 
     // Fan out per-artist detail fetches to collect album ids.
-    let album_ids: Vec<String> = stream::iter(
-        artists
-            .artists
-            .index
-            .into_iter()
-            .flat_map(|i| i.artist),
-    )
-    .map(|a| {
-        let client = Arc::clone(client);
-        async move {
-            match client.get_artist(&a.id).await {
-                Ok(detail) => detail
-                    .artist
-                    .album
-                    .into_iter()
-                    .map(|al| al.id)
-                    .collect::<Vec<_>>(),
-                Err(err) => {
-                    tracing::warn!(artist = %a.name, ?err, "getArtist failed");
-                    Vec::new()
+    let album_ids: Vec<String> =
+        stream::iter(artists.artists.index.into_iter().flat_map(|i| i.artist))
+            .map(|a| {
+                let client = Arc::clone(client);
+                async move {
+                    match client.get_artist(&a.id).await {
+                        Ok(detail) => detail
+                            .artist
+                            .album
+                            .into_iter()
+                            .map(|al| al.id)
+                            .collect::<Vec<_>>(),
+                        Err(err) => {
+                            tracing::warn!(artist = %a.name, ?err, "getArtist failed");
+                            Vec::new()
+                        }
+                    }
                 }
-            }
-        }
-    })
-    .buffer_unordered(ALBUM_FETCH_CONCURRENCY)
-    .flat_map(stream::iter)
-    .collect()
-    .await;
+            })
+            .buffer_unordered(ALBUM_FETCH_CONCURRENCY)
+            .flat_map(stream::iter)
+            .collect()
+            .await;
 
     tracing::info!(albums = album_ids.len(), "Subsonic: fetching album detail");
 
@@ -159,7 +149,9 @@ pub async fn build(client: &Arc<Client>) -> std::result::Result<Catalogue, Subso
                             next_pl_id += 1;
                         }
                     }
-                    Err(err) => tracing::warn!(playlist = %summary.name, ?err, "getPlaylist failed"),
+                    Err(err) => {
+                        tracing::warn!(playlist = %summary.name, ?err, "getPlaylist failed")
+                    }
                 }
             }
         }

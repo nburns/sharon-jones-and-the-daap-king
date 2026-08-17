@@ -29,11 +29,7 @@ pub(crate) fn auth_params(creds: &Credentials) -> Vec<(&'static str, String)> {
         Credentials::UserPassword { user, password } => {
             let salt = random_salt();
             let token = md5_hex(&format!("{}{}", password, salt));
-            vec![
-                ("u", user.clone()),
-                ("t", token),
-                ("s", salt),
-            ]
+            vec![("u", user.clone()), ("t", token), ("s", salt)]
         }
     }
 }
@@ -48,7 +44,9 @@ fn random_salt() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
     // 16-char hex salt — plenty of entropy for per-request freshness.
-    (0..16).map(|_| format!("{:x}", rng.random_range(0u8..=15))).collect()
+    (0..16)
+        .map(|_| format!("{:x}", rng.random_range(0u8..=15)))
+        .collect()
 }
 
 fn short_hash(s: &str) -> String {
@@ -76,7 +74,10 @@ mod tests {
 
     #[test]
     fn user_pass_mode_sends_three_params_with_fresh_salt() {
-        let creds = Credentials::UserPassword { user: "u".into(), password: "p".into() };
+        let creds = Credentials::UserPassword {
+            user: "u".into(),
+            password: "p".into(),
+        };
         let p1 = auth_params(&creds);
         let p2 = auth_params(&creds);
         // salts differ between calls

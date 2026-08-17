@@ -23,8 +23,8 @@ use futures::StreamExt;
 use media_source::{
     Database, DatabaseId, MediaSource, Playlist, Result, SourceError, StreamHandle, Track, TrackId,
 };
-use rupnp::ssdp::{SearchTarget, URN};
 use rupnp::Device;
+use rupnp::ssdp::{SearchTarget, URN};
 use url::Url;
 
 pub const MEDIA_SERVER_URN: URN = URN::device("schemas-upnp-org", "MediaServer", 1);
@@ -329,7 +329,11 @@ impl DlnaSource {
 
         // Parse Content-Range if the server honored our Range request.
         let (served_range, total_bytes_from_range) = if range.is_some() {
-            parse_content_range(resp.headers().get("Content-Range").and_then(|v| v.to_str().ok()))
+            parse_content_range(
+                resp.headers()
+                    .get("Content-Range")
+                    .and_then(|v| v.to_str().ok()),
+            )
         } else {
             (None, None)
         };
@@ -554,8 +558,14 @@ mod description_tests {
 
     #[test]
     fn extract_tag_pulls_inner_text() {
-        assert_eq!(extract_tag("<foo>bar</foo>", "foo"), Some("bar".to_string()));
-        assert_eq!(extract_tag("<foo> spaced </foo>", "foo"), Some("spaced".to_string()));
+        assert_eq!(
+            extract_tag("<foo>bar</foo>", "foo"),
+            Some("bar".to_string())
+        );
+        assert_eq!(
+            extract_tag("<foo> spaced </foo>", "foo"),
+            Some("spaced".to_string())
+        );
         assert_eq!(extract_tag("no match", "foo"), None);
     }
 }

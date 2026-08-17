@@ -86,7 +86,12 @@ pub struct StreamHandle {
 
 impl StreamHandle {
     pub fn full(content_type: &'static str, total_bytes: Option<u64>, body: ByteStream) -> Self {
-        Self { content_type, total_bytes, range: None, body }
+        Self {
+            content_type,
+            total_bytes,
+            range: None,
+            body,
+        }
     }
 }
 

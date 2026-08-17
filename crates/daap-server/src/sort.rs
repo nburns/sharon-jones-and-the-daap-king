@@ -154,7 +154,11 @@ fn cmp_field(a: &Track, b: &Track, f: Field, desc: bool) -> Ordering {
 fn cmp_opt<T: Ord>(a: Option<T>, b: Option<T>, desc: bool) -> Ordering {
     match (a, b) {
         (Some(x), Some(y)) => {
-            if desc { y.cmp(&x) } else { x.cmp(&y) }
+            if desc {
+                y.cmp(&x)
+            } else {
+                x.cmp(&y)
+            }
         }
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
@@ -206,19 +210,37 @@ mod tests {
     #[test]
     fn parses_short_alias_asc() {
         let k = parse("artist").unwrap();
-        assert_eq!(k, vec![SortKey { field: Field::Artist, desc: false }]);
+        assert_eq!(
+            k,
+            vec![SortKey {
+                field: Field::Artist,
+                desc: false
+            }]
+        );
     }
 
     #[test]
     fn parses_daap_field_name() {
         let k = parse("daap.songartist").unwrap();
-        assert_eq!(k, vec![SortKey { field: Field::Artist, desc: false }]);
+        assert_eq!(
+            k,
+            vec![SortKey {
+                field: Field::Artist,
+                desc: false
+            }]
+        );
     }
 
     #[test]
     fn parses_dash_prefix_as_desc() {
         let k = parse("-year").unwrap();
-        assert_eq!(k, vec![SortKey { field: Field::Year, desc: true }]);
+        assert_eq!(
+            k,
+            vec![SortKey {
+                field: Field::Year,
+                desc: true
+            }]
+        );
     }
 
     #[test]
@@ -227,10 +249,22 @@ mod tests {
         assert_eq!(
             k,
             vec![
-                SortKey { field: Field::Artist, desc: false },
-                SortKey { field: Field::Album, desc: false },
-                SortKey { field: Field::DiscNumber, desc: false },
-                SortKey { field: Field::TrackNumber, desc: false },
+                SortKey {
+                    field: Field::Artist,
+                    desc: false
+                },
+                SortKey {
+                    field: Field::Album,
+                    desc: false
+                },
+                SortKey {
+                    field: Field::DiscNumber,
+                    desc: false
+                },
+                SortKey {
+                    field: Field::TrackNumber,
+                    desc: false
+                },
             ]
         );
     }
@@ -241,8 +275,14 @@ mod tests {
         assert_eq!(
             k,
             vec![
-                SortKey { field: Field::Artist, desc: true },
-                SortKey { field: Field::Album, desc: false },
+                SortKey {
+                    field: Field::Artist,
+                    desc: true
+                },
+                SortKey {
+                    field: Field::Album,
+                    desc: false
+                },
             ]
         );
     }

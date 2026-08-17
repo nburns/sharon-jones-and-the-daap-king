@@ -24,7 +24,7 @@ pub mod encoder;
 pub mod palette;
 
 pub use encoder::{encode_bitmap, encode_direct_bits_rect_rgb, encode_indexed, encode_packbits};
-pub use palette::{gray_ramp, Rgb, MAC_16_COLOR, MAC_4_COLOR, MAC_SYSTEM_PALETTE};
+pub use palette::{MAC_4_COLOR, MAC_16_COLOR, MAC_SYSTEM_PALETTE, Rgb, gray_ramp};
 
 /// Error returned by encode functions.
 #[derive(Debug, thiserror::Error)]

@@ -8,7 +8,7 @@ use media_source::ByteStream;
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use crate::auth::{auth_params, Credentials};
+use crate::auth::{Credentials, auth_params};
 use crate::model;
 
 const API_VERSION: &str = "1.16.1";
@@ -41,7 +41,11 @@ impl Client {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        Ok(Self { base_url, creds, http })
+        Ok(Self {
+            base_url,
+            creds,
+            http,
+        })
     }
 
     pub fn base_url(&self) -> &Url {
@@ -166,7 +170,10 @@ impl Client {
     }
 
     /// GET /rest/getCoverArt — returns the raw image bytes.
-    pub async fn get_cover_art(&self, id: &str) -> std::result::Result<bytes::Bytes, SubsonicError> {
+    pub async fn get_cover_art(
+        &self,
+        id: &str,
+    ) -> std::result::Result<bytes::Bytes, SubsonicError> {
         let url = self.request_url("getCoverArt", &[("id", id)]);
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
@@ -195,7 +202,10 @@ impl Client {
         &self,
         id: &str,
         range: Option<(u64, Option<u64>)>,
-    ) -> std::result::Result<(&'static str, Option<u64>, Option<(u64, u64)>, ByteStream), SubsonicError> {
+    ) -> std::result::Result<
+        (&'static str, Option<u64>, Option<(u64, u64)>, ByteStream),
+        SubsonicError,
+    > {
         // format=raw prevents server-side transcoding — we'll do our own.
         let url = self.request_url("stream", &[("id", id), ("format", "raw")]);
         let mut req = self.http.get(url);

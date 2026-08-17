@@ -20,7 +20,7 @@ use std::sync::Arc;
 use media_source::MediaSource;
 use tokio::net::TcpListener;
 
-use crate::http::{router, HandlerState};
+use crate::http::{HandlerState, router};
 
 #[derive(Debug, Clone)]
 pub struct Config {

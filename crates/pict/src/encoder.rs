@@ -10,8 +10,8 @@
 //!
 //! Reference: Inside Macintosh: Imaging with QuickDraw, chapter 7 "Pictures".
 
-use crate::palette::Rgb;
 use crate::PictError;
+use crate::palette::Rgb;
 
 const OP_NOP: u16 = 0x0000;
 const OP_CLIP: u16 = 0x0001;
@@ -70,7 +70,11 @@ pub fn encode_packbits(
 
     let row_bytes = pixmap_row_bytes(width, pixel_size);
     let pixels_per_byte = 8 / pixel_size as usize;
-    let mask = if pixel_size == 8 { 0xFF_u8 } else { (1u8 << pixel_size) - 1 };
+    let mask = if pixel_size == 8 {
+        0xFF_u8
+    } else {
+        (1u8 << pixel_size) - 1
+    };
 
     let mut row_buf = vec![0u8; row_bytes as usize];
     for y in 0..height as usize {
@@ -339,10 +343,7 @@ fn pack_bits(input: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i < input.len() {
         let mut run_len = 1;
-        while i + run_len < input.len()
-            && input[i + run_len] == input[i]
-            && run_len < 128
-        {
+        while i + run_len < input.len() && input[i + run_len] == input[i] && run_len < 128 {
             run_len += 1;
         }
         if run_len >= 3 {
@@ -356,9 +357,8 @@ fn pack_bits(input: &[u8]) -> Vec<u8> {
             let mut lit_len = 1;
             i += 1;
             while i < input.len() && lit_len < 128 {
-                let looks_like_run = i + 2 < input.len()
-                    && input[i] == input[i + 1]
-                    && input[i] == input[i + 2];
+                let looks_like_run =
+                    i + 2 < input.len() && input[i] == input[i + 1] && input[i] == input[i + 2];
                 if looks_like_run {
                     break;
                 }
@@ -375,7 +375,7 @@ fn pack_bits(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::{gray_ramp, MAC_4_COLOR, MAC_16_COLOR, MAC_SYSTEM_PALETTE};
+    use crate::palette::{MAC_4_COLOR, MAC_16_COLOR, MAC_SYSTEM_PALETTE, gray_ramp};
 
     #[test]
     fn packbits_run_of_five() {
@@ -462,7 +462,13 @@ mod tests {
     #[test]
     fn encode_indexed_len_mismatch_errors() {
         let e = encode_indexed(4, 4, &MAC_SYSTEM_PALETTE, &[0u8; 3]).unwrap_err();
-        assert!(matches!(e, PictError::LenMismatch { got: 3, expected: 16 }));
+        assert!(matches!(
+            e,
+            PictError::LenMismatch {
+                got: 3,
+                expected: 16
+            }
+        ));
     }
 
     #[test]

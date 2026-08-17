@@ -55,7 +55,10 @@ pub enum OutputVariant {
     Jpeg,
     /// PICT output with the given depth and optional mode.
     /// D1 and D24 always use mode=None in the cache key.
-    Pict { depth: PictDepth, mode: Option<PictMode> },
+    Pict {
+        depth: PictDepth,
+        mode: Option<PictMode>,
+    },
 }
 
 impl OutputVariant {
@@ -128,7 +131,12 @@ impl Artworker {
         requested_h: Option<u32>,
         variant: OutputVariant,
     ) -> Prepared {
-        let key = CacheKey { track, w: requested_w, h: requested_h, variant };
+        let key = CacheKey {
+            track,
+            w: requested_w,
+            h: requested_h,
+            variant,
+        };
         if let Some(hit) = self.lookup(key) {
             return Prepared::Encoded {
                 bytes: hit,
@@ -159,7 +167,9 @@ impl Artworker {
             }
             Err(err) => {
                 tracing::warn!(
-                    track, ?variant, ?err,
+                    track,
+                    ?variant,
+                    ?err,
                     "artwork encode failed; falling back to original bytes"
                 );
                 let ct = sniff_content_type(&source_bytes);
@@ -196,18 +206,14 @@ fn decode_and_resize(
         return Ok((src_w, src_h, rgb.into_raw()));
     }
 
-    let src_image = fr::images::Image::from_vec_u8(
-        src_w,
-        src_h,
-        rgb.into_raw(),
-        fr::PixelType::U8x3,
-    )
-    .map_err(|e| ArtworkError::Resize(e.to_string()))?;
+    let src_image =
+        fr::images::Image::from_vec_u8(src_w, src_h, rgb.into_raw(), fr::PixelType::U8x3)
+            .map_err(|e| ArtworkError::Resize(e.to_string()))?;
     let mut dst_image = fr::images::Image::new(dst_w, dst_h, fr::PixelType::U8x3);
 
     let mut resizer = fr::Resizer::new();
-    let options = fr::ResizeOptions::new()
-        .resize_alg(fr::ResizeAlg::Convolution(fr::FilterType::Lanczos3));
+    let options =
+        fr::ResizeOptions::new().resize_alg(fr::ResizeAlg::Convolution(fr::FilterType::Lanczos3));
     resizer
         .resize(&src_image, &mut dst_image, &options)
         .map_err(|e| ArtworkError::Resize(e.to_string()))?;
@@ -285,8 +291,7 @@ fn encode_pict(
                 .chunks_exact(3)
                 .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
                 .collect();
-            let indices =
-                pict::dither::floyd_steinberg_palette(w, h, &pixels, &pict::MAC_16_COLOR);
+            let indices = pict::dither::floyd_steinberg_palette(w, h, &pixels, &pict::MAC_16_COLOR);
             pict::encode_packbits(w, h, 4, &pict::MAC_16_COLOR, &indices)
                 .map_err(|e| ArtworkError::Pict(e.to_string()))
         }
@@ -307,20 +312,14 @@ fn encode_pict(
                 .chunks_exact(3)
                 .map(|c| pict::Rgb::new(c[0], c[1], c[2]))
                 .collect();
-            let indices = pict::dither::floyd_steinberg_indexed(
-                w,
-                h,
-                &pixels,
-                &pict::MAC_SYSTEM_PALETTE,
-            );
+            let indices =
+                pict::dither::floyd_steinberg_indexed(w, h, &pixels, &pict::MAC_SYSTEM_PALETTE);
             pict::encode_indexed(w, h, &pict::MAC_SYSTEM_PALETTE, &indices)
                 .map_err(|e| ArtworkError::Pict(e.to_string()))
         }
 
-        (PictDepth::D24, _) => {
-            pict::encode_direct_bits_rect_rgb(w, h, &rgb)
-                .map_err(|e| ArtworkError::Pict(e.to_string()))
-        }
+        (PictDepth::D24, _) => pict::encode_direct_bits_rect_rgb(w, h, &rgb)
+            .map_err(|e| ArtworkError::Pict(e.to_string())),
 
         // Unreachable when callers validate mode correctly, but handle gracefully.
         _ => Err(ArtworkError::Pict(
@@ -351,7 +350,21 @@ pub fn sniff_content_type(bytes: &[u8]) -> &'static str {
         [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "image/webp",
         _ => "application/octet-stream",
     }
 }
@@ -400,7 +413,10 @@ mod tests {
         assert_eq!(sniff_content_type(b"\x89PNG\r\n\x1a\n"), "image/png");
         assert_eq!(sniff_content_type(b"GIF89a"), "image/gif");
         assert_eq!(sniff_content_type(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp");
-        assert_eq!(sniff_content_type(b"random data"), "application/octet-stream");
+        assert_eq!(
+            sniff_content_type(b"random data"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -444,23 +460,11 @@ mod tests {
     fn cache_hits_second_lookup() {
         let png = tiny_png();
         let art = Artworker::new(Config::default());
-        let first = match art.prepare(
-            1,
-            png.clone(),
-            Some(32),
-            Some(32),
-            OutputVariant::Jpeg,
-        ) {
+        let first = match art.prepare(1, png.clone(), Some(32), Some(32), OutputVariant::Jpeg) {
             Prepared::Encoded { bytes, .. } => bytes,
             _ => panic!("expected Encoded"),
         };
-        let second = match art.prepare(
-            1,
-            png.clone(),
-            Some(32),
-            Some(32),
-            OutputVariant::Jpeg,
-        ) {
+        let second = match art.prepare(1, png.clone(), Some(32), Some(32), OutputVariant::Jpeg) {
             Prepared::Encoded { bytes, .. } => bytes,
             _ => panic!("expected Encoded"),
         };
@@ -512,7 +516,10 @@ mod tests {
         for (i, &(depth, mode)) in cells.iter().enumerate() {
             let variant = OutputVariant::Pict { depth, mode };
             let bytes = match art.prepare(i as u32, png.clone(), Some(16), Some(16), variant) {
-                Prepared::Encoded { bytes, content_type } => {
+                Prepared::Encoded {
+                    bytes,
+                    content_type,
+                } => {
                     assert_pict_prelude(&bytes, content_type);
                     bytes
                 }
@@ -532,7 +539,10 @@ mod tests {
             png.clone(),
             Some(16),
             Some(16),
-            OutputVariant::Pict { depth: PictDepth::D8, mode: Some(PictMode::Color) },
+            OutputVariant::Pict {
+                depth: PictDepth::D8,
+                mode: Some(PictMode::Color),
+            },
         ) {
             Prepared::Encoded { bytes, .. } => bytes,
             _ => panic!("expected Encoded"),

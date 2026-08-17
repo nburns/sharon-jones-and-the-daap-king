@@ -9,17 +9,12 @@
 //!   * [`atkinson_1bit`]           — grayscale → 1-bit. 75% error propagated
 //!     to 6 neighbours; characteristic Mac high-contrast look.
 
-use crate::palette::{nearest_index, Rgb};
+use crate::palette::{Rgb, nearest_index};
 
 /// Floyd-Steinberg dither RGB → indexed against any palette. Input is
 /// width×height RGB pixels; output is width×height palette indices.
 /// Serpentine scan.
-pub fn floyd_steinberg_palette(
-    width: u32,
-    height: u32,
-    rgb: &[Rgb],
-    palette: &[Rgb],
-) -> Vec<u8> {
+pub fn floyd_steinberg_palette(width: u32, height: u32, rgb: &[Rgb], palette: &[Rgb]) -> Vec<u8> {
     assert_eq!(rgb.len(), (width * height) as usize);
     let mut buf: Vec<[i16; 3]> = rgb
         .iter()
@@ -40,7 +35,13 @@ pub fn floyd_steinberg_palette(
             let idx_here = y * w + x;
             let p = buf[idx_here];
             let clamp = |v: i16| -> u8 {
-                if v < 0 { 0 } else if v > 255 { 255 } else { v as u8 }
+                if v < 0 {
+                    0
+                } else if v > 255 {
+                    255
+                } else {
+                    v as u8
+                }
             };
             let snapped = Rgb::new(clamp(p[0]), clamp(p[1]), clamp(p[2]));
             let pi = nearest_index(palette, snapped);
@@ -221,7 +222,7 @@ pub fn atkinson_1bit(width: u32, height: u32, gray: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::{Rgb, MAC_SYSTEM_PALETTE};
+    use crate::palette::{MAC_SYSTEM_PALETTE, Rgb};
 
     #[test]
     fn fs_all_black_stays_black() {

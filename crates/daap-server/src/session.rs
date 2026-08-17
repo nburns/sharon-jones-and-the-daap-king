@@ -1,8 +1,8 @@
 //! Session tracking for DAAP /login → subsequent-request session-id flow.
 //! Sessions are ephemeral, in-memory, and monotonically issued.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::collections::HashMap;
 
