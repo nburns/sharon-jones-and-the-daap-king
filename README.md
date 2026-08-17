@@ -124,6 +124,42 @@ On Plex under Music, good choices are:
    keyed per (server URL, root) so a fresh id triggers a rebrowse
    automatically, but stale entries can accumulate.
 
+## Running at boot (systemd user service)
+
+`contrib/systemd/` has a unit that runs the DLNA backend as your own
+user, with the site-specific values in a separate env file so the unit
+itself needs no editing:
+
+```sh
+cargo install --path crates/sharon-jones --locked
+
+mkdir -p ~/.config/sharon-jones
+cp contrib/systemd/env.example ~/.config/sharon-jones/env
+$EDITOR ~/.config/sharon-jones/env
+
+cp contrib/systemd/sharon-jones-and-the-daap-king.service \
+   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now sharon-jones-and-the-daap-king
+
+# Without this a user service waits for your first login rather than
+# starting at boot.
+loginctl enable-linger "$USER"
+```
+
+Logs: `journalctl --user -u sharon-jones-and-the-daap-king -f`.
+
+Notes:
+
+- The unit runs the installed binary, not `cargo run`, so nothing
+  compiles at boot.
+- The catalogue cache goes to `~/.cache/sharon-jones` via
+  `CacheDirectory=`, rather than the `/tmp` default that a reboot wipes.
+- Values in the env file are literal — no quoting. `SHARON_JONES_NAME=My
+  Library` is right; adding quotes makes them part of the name.
+- The unit covers the `dlna` backend. For `fs` or `subsonic`, swap the
+  subcommand and its flags in `ExecStart`.
+
 ## Development
 
 ```

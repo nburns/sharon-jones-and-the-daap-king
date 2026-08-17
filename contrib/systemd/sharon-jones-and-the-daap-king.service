@@ -1,0 +1,46 @@
+[Unit]
+Description=Sharon Jones and the DAAP King
+After=network.target
+
+[Service]
+# Install the binary first:
+#   cargo install --path crates/sharon-jones --locked
+# %h is the invoking user's home, so this unit is not tied to a username.
+# Deliberately not `cargo run` - that would compile at boot.
+
+# Site-specific values live here; see env.example. No `-` prefix, so a missing
+# file fails the unit loudly instead of starting with every value empty.
+EnvironmentFile=%h/.config/sharon-jones/env
+
+# ${VAR} rather than $VAR: systemd word-splits the unbraced form, which would
+# turn a library name containing spaces into several arguments.
+#
+# This covers the dlna backend. For `fs` or `subsonic`, replace everything from
+# `dlna` onwards with that subcommand and its own flags.
+ExecStart=%h/.cargo/bin/sharon-jones \
+    --name ${SHARON_JONES_NAME} \
+    --hostname ${SHARON_JONES_HOSTNAME} \
+    dlna \
+    --server ${SHARON_JONES_SERVER} \
+    --root ${SHARON_JONES_ROOT} \
+    --cache-dir %C/sharon-jones/dlna
+
+# ffmpeg/ffprobe are looked up on PATH for transcoding; systemd's default user
+# PATH does not include them reliably.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# ~/.cache/sharon-jones, created and owned by systemd. The CLI default is under
+# /tmp, which is wiped on reboot and would force a full DLNA rebrowse on every
+# start.
+CacheDirectory=sharon-jones
+
+Restart=always
+# SSDP discovery needs the LAN up; at boot this can lose the race, so retry
+# rather than fail permanently.
+RestartSec=10
+# The server sends an mDNS goodbye on SIGTERM - give it room to land before
+# systemd escalates to SIGKILL.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
