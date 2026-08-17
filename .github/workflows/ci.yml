@@ -17,7 +17,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The workspace is edition 2024, which needs rustc >= 1.85. The runner
       # image ships a stable toolchain but not necessarily a current one, and
@@ -31,7 +31,7 @@ jobs:
           rustc --version && cargo --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -48,3 +48,19 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
+
+  # Separate job so a formatting nit does not mask the test results: rustfmt
+  # needs no compilation, so this finishes long before `test` either way.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
