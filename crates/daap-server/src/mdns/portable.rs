@@ -78,10 +78,21 @@ pub struct Advertisement {
 }
 
 impl Advertisement {
-    pub fn start(name: &str, port: u16) -> Result<Self, StartError> {
-        require_valid_hostname(name)?;
+    /// Advertises the DAAP service.
+    ///
+    /// `name` is the DNS-SD service instance name - the string iTunes shows
+    /// under Shared. Per RFC 6763 section 4.1.1 it is free-form UTF-8, so
+    /// spaces and punctuation are fine here.
+    ///
+    /// `hostname` is a separate thing: the single DNS label this host is
+    /// published under, which the SRV record points at. It must be a valid
+    /// label (ASCII alphanumeric plus `-`), and `.local.` is appended to it.
+    /// It has to be distinct from any name another responder on this machine
+    /// already claims - notably the system hostname, which avahi defends.
+    pub fn start(name: &str, hostname: &str, port: u16) -> Result<Self, StartError> {
+        require_valid_hostname(hostname)?;
         let daemon = ServiceDaemon::new()?;
-        let hostname = format!("{}.local.", name);
+        let hostname = format!("{}.local.", hostname);
 
         let mut txt = HashMap::<String, String>::new();
         txt.insert("txtvers".into(), "1".into());

@@ -46,9 +46,25 @@ fn run_emergency_stop() {
 #[derive(Parser, Debug)]
 #[command(name = "citunes", about = "Serve a music library over DAAP for old iTunes clients")]
 struct Args {
-    /// Library name advertised over mDNS.
+    /// Library name advertised over mDNS. Shown under Shared in iTunes.
+    /// Free-form: spaces and punctuation are fine.
     #[arg(short, long, default_value = "Classic iTunes Streamer")]
     name: String,
+
+    /// Hostname to publish this server under, without the `.local.` suffix
+    /// (e.g. `music-box`). ASCII letters, digits and `-` only. The SRV record
+    /// points here, so it must not collide with a name another mDNS responder
+    /// on this machine already claims - in particular the system hostname,
+    /// which avahi defends and would rename itself over.
+    ///
+    /// Required on platforms using the in-process mDNS backend. On macOS the
+    /// system mDNSResponder supplies the host record and this is ignored.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        arg(long, required_unless_present = "no_mdns")
+    )]
+    #[cfg_attr(target_os = "macos", arg(long))]
+    hostname: Option<String>,
 
     /// Bind address for the DAAP HTTP server.
     #[arg(short, long, default_value = "0.0.0.0:3689")]
@@ -202,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let make_opts = |name: String| ServeOpts {
         name,
+        hostname: args.hostname.clone(),
         bind: args.bind,
         no_mdns: args.no_mdns,
         transcode: transcode_cfg.clone(),
@@ -314,6 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 struct ServeOpts {
     name: String,
+    hostname: Option<String>,
     bind: SocketAddr,
     no_mdns: bool,
     transcode: transcode::Config,
@@ -362,7 +380,13 @@ async fn serve<S: MediaSource + 'static>(
     let mut mdns: Option<Advertisement> = if opts.no_mdns {
         None
     } else {
-        let adv = Advertisement::start(&opts.name, opts.bind.port())?;
+        // clap marks --hostname required (unless --no-mdns) on the backends
+        // that publish their own host record, so this only falls back to ""
+        // on macOS, where the value is ignored. If an empty string ever did
+        // reach a backend that needs it, require_valid_hostname rejects it
+        // rather than letting it register something unresolvable.
+        let hostname = opts.hostname.as_deref().unwrap_or_default();
+        let adv = Advertisement::start(&opts.name, hostname, opts.bind.port())?;
         register_teardown(adv.teardown_handle());
         Some(adv)
     };
@@ -390,4 +414,35 @@ async fn serve<S: MediaSource + 'static>(
 
     result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The instance name is free-form and must never be validated as a DNS
+    /// label - the shipped default contains spaces.
+    #[test]
+    fn default_name_is_accepted_alongside_an_explicit_hostname() {
+        let args =
+            Args::try_parse_from(["citunes", "--hostname", "music-box", "fs", "--music", "/tmp"])
+                .expect("default name with an explicit hostname should parse");
+        assert_eq!(args.name, "Classic iTunes Streamer");
+        assert_eq!(args.hostname.as_deref(), Some("music-box"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn hostname_is_required_when_advertising() {
+        Args::try_parse_from(["citunes", "fs", "--music", "/tmp"])
+            .expect_err("advertising without --hostname should be rejected at parse time");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn hostname_is_not_required_without_mdns() {
+        let args = Args::try_parse_from(["citunes", "--no-mdns", "fs", "--music", "/tmp"])
+            .expect("--no-mdns should not require a hostname");
+        assert!(args.hostname.is_none());
+    }
 }

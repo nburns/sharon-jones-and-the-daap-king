@@ -6,6 +6,15 @@
 //! the LAN, so old iTunes clients on other hosts never see the A record for
 //! our hostname.  On other platforms we keep the in-process `mdns-sd` path.
 //!
+//! # Instance name vs. hostname
+//!
+//! These are two different fields and must not be conflated. The service
+//! instance name is free-form UTF-8 shown to users (RFC 6763 section 4.1.1);
+//! the hostname is a DNS label the SRV record points at. macOS only lets us
+//! set the former - mDNSResponder owns the host record - whereas the portable
+//! backend has to publish both, so `Advertisement::start` takes them
+//! separately and only the hostname is validated.
+//!
 //! # Teardown contract
 //!
 //! Prefer calling `Advertisement::stop().await` to ensure an mDNS goodbye
@@ -77,6 +86,13 @@ mod tests {
     #[test]
     fn hostname_rejects_empty() {
         assert!(require_valid_hostname("").is_err());
+    }
+
+    /// Regression guard: the CLI's default library name is not a legal DNS
+    /// label, so the instance name and the hostname must stay separate fields.
+    #[test]
+    fn default_library_name_is_not_a_valid_hostname() {
+        assert!(require_valid_hostname("Classic iTunes Streamer").is_err());
     }
 
     #[test]

@@ -56,7 +56,15 @@ pub struct Advertisement {
 }
 
 impl Advertisement {
-    pub fn start(name: &str, port: u16) -> io::Result<Self> {
+    /// Advertises the DAAP service. `name` is the DNS-SD service instance
+    /// name and may contain spaces.
+    ///
+    /// `hostname` is accepted for signature parity with the portable backend
+    /// and deliberately ignored: `dns-sd -R` registers the service only, and
+    /// mDNSResponder answers with the machine's own host record. There is no
+    /// way to override it here, so callers on macOS always get the system
+    /// hostname as the SRV target regardless of what they pass.
+    pub fn start(name: &str, _hostname: &str, port: u16) -> io::Result<Self> {
         let txt = [
             ("txtvers", "1"),
             ("Version", "196610"),

@@ -18,15 +18,34 @@ them into the DAAP server:
 
 ```
 # Filesystem
-cargo run -p citunes-cli --release -- fs --music ~/Music
+cargo run -p citunes-cli --release -- --hostname music-box fs --music ~/Music
 
 # DLNA — auto-discover a UPnP MediaServer on the LAN
-cargo run -p citunes-cli --release -- dlna
+cargo run -p citunes-cli --release -- --hostname music-box dlna
 
 # Subsonic
 SUBSONIC_API_KEY=... cargo run -p citunes-cli --release -- \
-  subsonic -u http://navidrome.local:4533
+  --hostname music-box subsonic -u http://navidrome.local:4533
 ```
+
+## Naming: `--name` vs `--hostname`
+
+These are two different DNS-SD fields and the CLI keeps them separate:
+
+- `--name` is the **service instance name** — what iTunes shows under
+  **Shared**. It is free-form UTF-8 (RFC 6763 §4.1.1), so
+  `--name "Nick's Music"` is fine.
+- `--hostname` is the **DNS label** the SRV record points at, published
+  as `<hostname>.local.`. It must be ASCII alphanumeric plus `-`.
+
+Everywhere except macOS the server publishes its own host record, so
+`--hostname` is required (unless you pass `--no-mdns`). Pick something
+unique to this server: if you reuse a name another responder on the box
+already defends — most importantly the system hostname, which avahi
+owns — the two will fight over it and one will get renamed.
+
+On macOS the system mDNSResponder supplies the host record and there is
+no way to override it, so `--hostname` is accepted and ignored there.
 
 `ffmpeg` / `ffprobe` must be on `PATH` for transcoding (MP3 for iTunes
 < 4.5, ALAC for lossless sources on newer clients).
